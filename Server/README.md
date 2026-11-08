@@ -2,6 +2,8 @@
 
 Python **3.12 standard library**, SQLite, Linux OverlayFS and a **separate container Samba**. No host Samba configuration, host users, NAS credentials, original games or existing saves are modified. No game is published automatically. Source editions must remain frozen while published.
 
+The dedicated gateway publishes one configured external SMB host/port. Its generated Samba `[global]` configuration explicitly sets `server multi channel support = no`, avoiding SMB multichannel discovery of container/private interfaces that are not reachable through that single endpoint. This applies only to the gateway's separate Samba; it does not change the original NAS service or Windows connections. See the [Samba parameter documentation](https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#SERVERMULTICHANNELSUPPORT).
+
 本组件使用 Python 3.12 标准库、SQLite、OverlayFS 和独立容器 Samba。源目录只读，账号进度仅写入专用 ext4 状态目录；不修改宿主 Samba、宿主账号、原游戏或已有存档。扫描后必须勾选发布并授权。
 
 ## Deployment / 部署

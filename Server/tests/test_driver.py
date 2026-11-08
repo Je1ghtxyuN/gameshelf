@@ -1,4 +1,5 @@
 import importlib.util
+import configparser
 from pathlib import Path
 import subprocess
 import tempfile
@@ -38,6 +39,16 @@ class DriverTests(unittest.TestCase):
                              prepare_view=lambda *args: None, chown=lambda *args: None)
         self.lease = dict(id='a'*32, user_id='b'*32, game_id='c'*32)
         self.user = dict(id='b'*32, uid=20000)
+    def test_single_external_endpoint_disables_multichannel_across_share_reloads(self):
+        def check_config():
+            config = configparser.RawConfigParser()
+            config.read_string(self.d.config.read_text())
+            self.assertEqual(config.get('global', 'server multi channel support', fallback='yes'), 'no')
+        check_config()
+        self.d.open(self.lease, self.source, self.user)
+        check_config()
+        self.d.close(self.lease)
+        check_config()
     def test_private_paths_and_encrypted_smb_no_secret_arguments(self):
         share = self.d.open(self.lease, self.source, self.user)
         config = self.d.config.read_text()

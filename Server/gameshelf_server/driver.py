@@ -126,6 +126,7 @@ server role = standalone server
 security = user
 server min protocol = SMB3_00
 server smb encrypt = required
+server multi channel support = no
 smb ports = 445
 disable netbios = yes
 map to guest = Never
