@@ -29,6 +29,7 @@ $m=[pscustomobject]@{RemotePath=$p.unc;TcpPort=2445;Status=0}
 $script:failed=0;$script:count=0
 function CheckCase([string]$name,[scriptblock]$case){$script:count++;try{& $case;Write-Output ('PASS '+$name)}catch{$script:failed++;Write-Output ('FAIL '+$name)}}
 function Expect($expected,$actual){if($expected -ne $actual){throw 'Assertion failed'}}
+CheckCase 'actual allocation query reserves Unavailable mapped letters' {$query=DecodeLiteral $source 'AllocationQuery';$script:created=$true;$script:current=[pscustomobject]@{LocalPath='Z:';RemotePath=$p.unc;Status='Unavailable';TcpPort=$null};try{$letters=(& ([scriptblock]::Create($query)))|ConvertFrom-Json;Expect 1 @($letters).Count;Expect 'Z:' @($letters)[0]}finally{$script:created=$false}}
 CheckCase 'actual Match accepts exactly one separator without OR short circuit' {$script:connections=@([pscustomobject]@{ShareName='synthetic';Credential=$qualified});$p.credential='unmatched-receipt';try{Expect 1 @($qualified.ToCharArray()|Where-Object {$_ -eq [char]92}).Count;Expect $false ($qualified -eq $p.credential);Expect $false ($qualified -eq $p.username);Expect $true (Match $m $p)}finally{$p.credential='fixture'}}
 CheckCase 'actual Match accepts exact acknowledged credential' {$p.credential=$qualified;Expect $true (Match $m $p);$p.credential='fixture'}
 CheckCase 'actual Match rejects foreign credential' {$script:connections=@([pscustomobject]@{ShareName='synthetic';Credential='DOMAIN\other'});Expect $false (Match $m $p)}

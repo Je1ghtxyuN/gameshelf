@@ -20,7 +20,7 @@ public sealed class WindowsView(IMappingBackend? mappingBackend=null):IReviewedW
     public async Task<string> Connect(SmbShare share,CancellationToken ct)
     {
         share.Validate();if(owned!=null)throw new InvalidOperationException("视图已连接");
-        var drive=backend.ChooseDrive();var operation=Guid.NewGuid();
+        var drive=await Task.Run(backend.ChooseDrive,ct);ct.ThrowIfCancellationRequested();var operation=Guid.NewGuid();
         var receipt=await backend.Create(share,drive,operation,ct);
         if(receipt.OperationID!=operation||receipt.Drive!=drive||receipt.Unc!=share.Unc||receipt.Port!=share.Port||receipt.Host!=share.Host||receipt.Share!=share.ShareName)throw new InvalidDataException("Mapping acknowledgement mismatch");
         owned=receipt;return receipt.Drive+@"\";
@@ -51,7 +51,30 @@ public sealed class SmbMappingException(SmbOperationStage stage,int? win32Error)
 public sealed class ShellMappingBackend:IMappingBackend
 {
     readonly HashSet<Guid> operations=[];
-    public string ChooseDrive(){var used=DriveInfo.GetDrives().Select(d=>d.Name[..2]).ToHashSet(StringComparer.OrdinalIgnoreCase);return Enumerable.Range('D',23).Select(i=>$"{(char)i}:").Reverse().FirstOrDefault(d=>!used.Contains(d))??throw new InvalidOperationException("没有可用盘符");}
+    // The redirector retains unavailable/persistent mappings not visible in DriveInfo.
+    // Query their letters read-only in the same PowerShell logon context as Create.
+    const string AllocationQuery="$stage='Preflight';$letters=@(Get-SmbMapping -ErrorAction Stop|ForEach-Object {if($_.LocalPath -match '^[A-Za-z]:$'){$_.LocalPath.ToUpperInvariant()}elseif(-not [string]::IsNullOrWhiteSpace($_.LocalPath)){throw 'Invalid mapping letter metadata'}}|Sort-Object -Unique);ConvertTo-Json -InputObject $letters -Compress";
+    public string ChooseDrive()
+    {
+        try{
+            var visible=DriveInfo.GetDrives().Select(d=>d.Name[..2]).ToArray();
+            var output=PowerShell(AllocationQuery,new{},TimeSpan.FromSeconds(10),CancellationToken.None).GetAwaiter().GetResult();
+            if(output.Length>512)throw new InvalidDataException();
+            var mapped=JsonSerializer.Deserialize<string[]>(output)??throw new InvalidDataException();
+            if(mapped.Length>26)throw new InvalidDataException();
+            return ChooseAvailableDrive(visible,mapped);
+        }catch(SmbMappingException){throw;}
+        catch{throw new SmbMappingException(SmbOperationStage.Preflight,null);}
+    }
+    internal static string ChooseAvailableDrive(IEnumerable<string> visible,IEnumerable<string> mapped)
+    {
+        var used=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach(var letter in visible.Concat(mapped)){
+            if(letter==null||letter.Length!=2||letter[1]!=':'||!char.IsAsciiLetter(letter[0]))throw new InvalidDataException("Invalid drive letter metadata");
+            used.Add(letter);
+        }
+        return Enumerable.Range('D',23).Select(i=>$"{(char)i}:").Reverse().FirstOrDefault(d=>!used.Contains(d))??throw new SmbMappingException(SmbOperationStage.Preflight,null);
+    }
     // Positive port evidence and exact share/credential identity are mandatory.
     // Missing/null/zero redirector port metadata never implies default445.
     const string Check="function Match($m,$p){if(-not $m -or $m.RemotePath -ne $p.unc){return $false}; if(-not $m.PSObject.Properties['TcpPort'] -or $null -eq $m.TcpPort -or [int]$m.TcpPort -le 0){return $false};if([int]$m.TcpPort -ne $p.port){return $false}; $c=@(Get-SmbConnection -ServerName $p.host | Where-Object {$_.ShareName -eq $p.share -and ($_.Credential -eq $p.credential -or $_.Credential -eq $p.username -or $_.Credential.EndsWith(('\\'+$p.username),[StringComparison]::OrdinalIgnoreCase))}); return $c.Count -eq 1}; ";

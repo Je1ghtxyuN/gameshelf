@@ -8,6 +8,8 @@ await Test("actual generated PowerShell credential/port/ownership fixtures",SmbP
 await Test("structured Create FQID Win32 error without secrets",()=>SmbPowerShellTests.Failure("Windows System Error 1219,New-SmbMapping","Create",1219));
 await Test("unknown error number is not scraped from message",()=>SmbPowerShellTests.Failure("SyntheticFailure1219","Verify",null));
 await Test("cleanup failure has separate stage",()=>SmbPowerShellTests.Failure("Windows System Error 5,Remove-SmbMapping","Cleanup",5));
+await Test("pure allocator reserves mapped letters and validates input",SmbPowerShellTests.Allocation);
+await Test("Connect drive selection does not block its calling thread",SmbPowerShellTests.NonBlockingChoice);
 if(args.SequenceEqual(new[]{"--smb-powershell-only"})){Console.WriteLine($"{count-failed}/{count} SMB PowerShell tests passed");return failed==0?0:1;}
 await Test("native suspended launch and normal exit",async()=>{await using var job=NativeJob.Start(Path.Combine(system,"cmd.exe"),system,"/c exit 0");using var timeout=new CancellationTokenSource(10000);await job.Wait(timeout.Token);await job.Stop();});
 await Test("job tracks descendants after launcher exits",async()=>{await using var job=NativeJob.Start(Path.Combine(system,"cmd.exe"),system,"/c start /b ping.exe -n 4 127.0.0.1");var clock=Stopwatch.StartNew();using var timeout=new CancellationTokenSource(15000);await job.Wait(timeout.Token);if(clock.Elapsed<TimeSpan.FromSeconds(2))throw new Exception("Descendant escaped monitoring");});
