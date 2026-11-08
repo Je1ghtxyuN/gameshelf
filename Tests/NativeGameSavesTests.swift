@@ -24,6 +24,14 @@ import Foundation
   guard try String(contentsOf:current.appendingPathComponent("Persistent"),encoding:.utf8)=="new",try String(contentsOf:otherTarget.appendingPathComponent("Persistent"),encoding:.utf8)=="prior" else{fatalError("conflict changed data")}
   let missing=base.appendingPathComponent("UnconnectedNAS")
   do{try NativeGameSaves.preparePhoenixes(game:game,managedRoot:missing,localRoot:local,home:home);fatalError("unconnected NAS faked")}catch{}
+  let ref=SharedGameReference(connectionID:UUID(),serverID:"fixture-server",accountID:"owner",gameID:String(repeating:"a",count:32))
+  var sharedA=game;sharedA.shared=ref
+  var sharedB=sharedA;sharedB.id=UUID();sharedB.originalFolder="gameshelf://same-account/canonical"
+  let firstID=try NativeGameSaves.storageID(game:sharedA,localRoot:base.appendingPathComponent("DeviceA"))
+  let secondID=try NativeGameSaves.storageID(game:sharedB,localRoot:base.appendingPathComponent("DeviceB"))
+  guard firstID==secondID,firstID==ref.gameIdentity else{fatalError("same account edition used device/local-record save identities")}
+  var other=sharedB;other.shared?.accountID="guest"
+  guard try NativeGameSaves.storageID(game:other,localRoot:base.appendingPathComponent("DeviceB")) != firstID else{fatalError("different accounts shared native save identity")}
   print("PASS Phoenixes save redirection, source backup, reuse, conflict preservation, missing NAS guard")
  }
 }

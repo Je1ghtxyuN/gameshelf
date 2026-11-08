@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NSTextFieldDelegate {
- private enum Page {case servers,address,login,catalog,retry,account}
+ private enum Page {case servers,address,login,account}
  private weak var app:App?
  private let store:SharedConnectionStore
  private var page:Page = .address
@@ -13,6 +13,7 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
  private let address=NSTextField(string:"")
  private let username=NSTextField(string:"")
  private let password=NSSecureTextField(string:"")
+ private let rememberLogin=NSButton(checkboxWithTitle:"保持登录",target:nil,action:nil)
  private var pin:String?
  private var invitationName:String?
  private var api:SharedAPI?
@@ -24,19 +25,22 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
  private var controls:[NSControl]=[]
  private var message:NSTextField?
  private var spinner:NSProgressIndicator?
- private var games:[SharedCatalogGame]=[]
  private var administratorSetupWindow:AdministratorSetupWindowController?
  private var administrationWindow:SharedAdministrationWindowController?
  private var accountRequested=false
  private var passwordWindow:PasswordWindowController?
  var sharingConnection:SharedConnection?{guard let selected,selected.isAdministrator,app?.sharedAccessTokens[selected.id] != nil else{return nil};return selected}
- func reloadSharedGames(){if !closed,selected != nil{loadCatalog()}}
+ func reloadSharedGames(){if !closed{app?.refreshAccountLibrary()}}
 
- func openLibrary(){
-  accountRequested=false
-  let binding=app.flatMap{try? PersonalLibraryBindingStore(root:$0.root)}?.binding
-  if let connection=SharedNavigation.preferred(connections:store.connections,boundID:binding?.connectionID,activeID:app?.sharedAccessTokens.activeConnectionID){choose(connection)}
-  else{showServers()}
+ func openLibrary(){openLogin()}
+ func openLogin(){
+  accountRequested=false;rememberLogin.state = .on
+  showServers()
+  // A saved server may be reused; a different account name is never prefilled.
+  if let connection=store.connections.first,Set(store.connections.map{$0.serverID}).count==1{choose(connection)}
+ }
+ func accountLibraryLoadFailed(_ error:Error){
+  loading=false;page = .login;password.stringValue="";feedback=friendly(error);feedbackIsError=true;render()
  }
  func openAccount(connectionID:UUID){
   accountRequested=true
@@ -48,14 +52,14 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
   self.app=app;store=try SharedConnectionStore(root:app.root)
   let window=NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:550),styleMask:[.titled,.closable,.miniaturizable],backing:.buffered,defer:false)
   super.init(window:window)
-  window.title="共享游戏库";window.isReleasedWhenClosed=false;window.delegate=self;window.appearance=NSAppearance(named:.aqua)
+  window.title="登录 GameShelf";window.isReleasedWhenClosed=false;window.delegate=self;window.appearance=NSAppearance(named:.aqua)
   address.placeholderString="服务器地址";username.placeholderString="账号";password.placeholderString="密码"
-  address.delegate=self;username.delegate=self;password.delegate=self
+  address.delegate=self;username.delegate=self;password.delegate=self;rememberLogin.state = .on
   page=store.connections.isEmpty ? .address:.servers
   render();window.center()
  }
  required init?(coder:NSCoder){fatalError()}
- func windowWillClose(_ notification:Notification){passwordWindow?.close();closed=true;operation=UUID();password.stringValue="";administrationWindow?.close();app?.sharedLibraryWindow=nil}
+ func windowWillClose(_ notification:Notification){if app?.accountLibrary?.active != true{app?.accountLibrary?.close();app?.accountLibrary=nil};passwordWindow?.close();closed=true;operation=UUID();password.stringValue="";administrationWindow?.close();app?.sharedLibraryWindow=nil}
  func controlTextDidBeginEditing(_ obj:Notification){(obj.object as? NSTextField)?.superview.flatMap{$0 as? SharedLoginInput}?.focus(true)}
  func controlTextDidEndEditing(_ obj:Notification){(obj.object as? NSTextField)?.superview.flatMap{$0 as? SharedLoginInput}?.focus(false)}
  private func label(_ value:String,size:CGFloat=14,weight:NSFont.Weight = .regular,secondary:Bool=false)->NSTextField {
@@ -82,9 +86,8 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
   guard let window,let root=window.contentView else{return}
   root.subviews.forEach{$0.removeFromSuperview()};controls=[];message=nil;spinner=nil
   root.wantsLayer=true;root.layer?.backgroundColor=NSColor.white.cgColor
-  if page == .catalog{renderCatalog(root);return}
   if page == .account{renderAccount(root);return}
-  window.title="共享游戏库"
+  window.title="登录 GameShelf"
   window.styleMask.remove(.resizable)
   window.minSize=NSSize(width:800,height:578)
   let art=SharedLoginArtwork();art.translatesAutoresizingMaskIntoConstraints=false;root.addSubview(art)
@@ -103,7 +106,7 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
    for connection in store.connections {
     let button=action(connection.name){[weak self] in self?.choose(connection)}
     let title=NSMutableAttributedString(string:connection.name+"\n",attributes:[.font:NSFont.systemFont(ofSize:14,weight:.semibold),.foregroundColor:NSColor.labelColor])
-    title.append(NSAttributedString(string:host(connection.address)+" · "+connection.username,attributes:[.font:NSFont.systemFont(ofSize:11),.foregroundColor:NSColor.secondaryLabelColor]))
+    title.append(NSAttributedString(string:host(connection.address),attributes:[.font:NSFont.systemFont(ofSize:11),.foregroundColor:NSColor.secondaryLabelColor]))
     button.attributedTitle=title;button.alignment = .left;button.isBordered=false;button.wantsLayer=true;button.layer?.cornerRadius=9;button.layer?.backgroundColor=NSColor(calibratedWhite:0.96,alpha:1).cgColor
     button.image=NSImage(systemSymbolName:"server.rack",accessibilityDescription:nil);button.imagePosition = .imageLeading
     list.addArrangedSubview(button);button.widthAnchor.constraint(equalTo:list.widthAnchor).isActive=true;button.heightAnchor.constraint(equalToConstant:58).isActive=true
@@ -126,14 +129,9 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
    let change=link("切换服务器"){[weak self] in self?.showServers()}
    add(stack([icon,serverName,NSView(),change],vertical:false,spacing:8))
    add(field("账号",username));add(field("密码",password));controls += [username,password]
+   add(rememberLogin);controls.append(rememberLogin)
    add(action("登录",primary:true){[weak self] in self?.login()})
-  case .retry:
-   add(label("暂时无法连接",size:24,weight:.semibold))
-   add(label(selected?.name ?? server?.name ?? "共享游戏库",size:14,secondary:true))
-   add(action("重试连接",primary:true){[weak self] in self?.loadCatalog()})
-   add(link("检查连接设置"){[weak self] in self?.page = .address;self?.feedback="";self?.render()})
-   add(link("选择其他服务器"){[weak self] in self?.showServers()})
-  case .catalog,.account:break
+  case .account:break
   }
   let progress=NSProgressIndicator();progress.style = .spinning;progress.controlSize = .small;progress.isDisplayedWhenStopped=false
   let text=label(feedback,size:12,secondary:!feedbackIsError);text.maximumNumberOfLines=3;text.lineBreakMode = .byWordWrapping
@@ -141,45 +139,11 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
   window.setContentSize(NSSize(width:800,height:550));applyLoading()
   if !loading{window.makeFirstResponder(page == .login ? (username.stringValue.isEmpty ? username:password):page == .address ? address:nil)}
  }
- private func renderCatalog(_ root:NSView){
-  guard let app,let window,let connection=selected else{return}
-  window.styleMask.insert(.resizable);window.minSize=NSSize(width:850,height:560);window.title=connection.name+" · 共享游戏库"
-  let title=stack([label(connection.name,size:24,weight:.semibold),label(host(connection.address),size:12,secondary:true)],spacing:5)
-  let refresh=action(""){[weak self] in self?.loadCatalog()}
-  refresh.image=NSImage(systemSymbolName:"arrow.clockwise",accessibilityDescription:"刷新游戏");refresh.toolTip="刷新游戏";refresh.isBordered=false
-  let account=action(connection.isAdministrator ? "账号管理":"账号"){[weak self] in if connection.isAdministrator{self?.openAdministration()}else{self?.openAccount(connectionID:connection.id)}}
-  account.image=NSImage(systemSymbolName:"person.crop.circle",accessibilityDescription:nil);account.imagePosition = .imageLeading
-  let change=action("切换服务器"){[weak self] in self?.showServers()}
-  var headerViews:[NSView]=[title,NSView(),refresh]
-  if connection.isAdministrator{headerViews.append(action("游戏扫描"){[weak self] in self?.app?.showDiscovery()})}
-  headerViews += [account,change]
-  let header=stack(headerViews,vertical:false,spacing:12)
-  let text=label(feedback,size:12,secondary:!feedbackIsError);text.maximumNumberOfLines=2;message=text
-  let progress=NSProgressIndicator();progress.style = .spinning;progress.controlSize = .small;progress.isDisplayedWhenStopped=false;spinner=progress
-  let status=stack([progress,text],vertical:false,spacing:8)
-  let separator=NSBox();separator.boxType = .separator
-  let scroll=NSScrollView();scroll.hasVerticalScroller=true;scroll.drawsBackground=false
-  let document=FlippedView();document.translatesAutoresizingMaskIntoConstraints=false;scroll.documentView=document
-  NSLayoutConstraint.activate([document.widthAnchor.constraint(equalTo:scroll.contentView.widthAnchor),document.leadingAnchor.constraint(equalTo:scroll.contentView.leadingAnchor),document.topAnchor.constraint(equalTo:scroll.contentView.topAnchor)])
-  let list=stack([],spacing:14);app.pin(list,to:document,inset:8)
-  for game in games where !game.entries.isEmpty {
-   let name=label(game.title,size:16,weight:.semibold)
-   let popup=NSPopUpButton();popup.addItems(withTitles:game.entries.map{$0.path+" · "+DiscoveryPresentation.platform(entry:$0)});popup.widthAnchor.constraint(equalToConstant:260).isActive=true;controls.append(popup)
-   let play=action("游玩"){[weak self] in self?.playShared(game,entry:popup.indexOfSelectedItem)}
-   let row=stack([name,NSView(),popup,play],vertical:false,spacing:14);list.addArrangedSubview(row);row.widthAnchor.constraint(equalTo:list.widthAnchor).isActive=true;row.heightAnchor.constraint(greaterThanOrEqualToConstant:58).isActive=true
-  }
-  if games.isEmpty{list.addArrangedSubview(label("暂无共享游戏",size:16,secondary:true))}
-  let footer=stack([label("\(games.count) 款游戏",size:12,secondary:true),NSView()],vertical:false)
-  let layout=stack([header,status,separator,scroll,footer],spacing:18);app.pin(layout,to:root,inset:28)
-  for view in [header,status,separator,scroll,footer]{view.widthAnchor.constraint(equalTo:layout.widthAnchor).isActive=true}
-  scroll.heightAnchor.constraint(greaterThanOrEqualToConstant:220).isActive=true;scroll.setContentHuggingPriority(.defaultLow,for:.vertical)
-  window.setContentSize(NSSize(width:940,height:620));applyLoading()
- }
  private func renderAccount(_ root:NSView){
   guard let app,let window,let connection=selected else{return}
   window.title="账号";window.styleMask.remove(.resizable);window.minSize=NSSize(width:680,height:550)
   root.layer?.backgroundColor=NSColor(calibratedWhite:0.98,alpha:1).cgColor
-  let back=action("返回共享库"){[weak self] in self?.accountRequested=false;self?.page = .catalog;self?.render();self?.loadCatalog()}
+  let back=action("完成"){[weak self] in self?.close()}
   back.image=NSImage(systemSymbolName:"chevron.left",accessibilityDescription:nil);back.imagePosition = .imageLeading
   let heading=stack([label("账号",size:27,weight:.bold),NSView(),back],vertical:false)
   let form=stack([heading],spacing:22);app.pin(form,to:root,inset:32);heading.widthAnchor.constraint(equalTo:form.widthAnchor).isActive=true
@@ -190,13 +154,7 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
   }
   let identity=stack([label(connection.username,size:25,weight:.semibold),NSView(),label(connection.isAdministrator ? "管理员":"普通账号",size:13,secondary:true)],vertical:false)
   card("当前账号",[identity,label(connection.name,size:14),label(host(connection.address),size:13,secondary:true)])
-  let bound=(try? PersonalLibraryBindingStore(root:app.root))?.binding
-  let isBound=bound?.connectionID==connection.id && bound?.serverID==connection.serverID && bound?.accountID==connection.accountID
-  let sync=action(isBound ? "同步资料":"绑定游戏库资料…"){[weak self] in
-   if isBound{self?.app?.syncPersonalLibrary(force:true)}else{self?.bindPersonalLibrary()}
-  }
-  card("个人游戏库",[label(isBound ? "已绑定 · \(app.store.games.count) 款游戏":"未绑定",size:15),stack([sync,NSView()],vertical:false)])
-  var footer:[NSView]=[action("切换服务器"){[weak self] in self?.accountRequested=false;self?.showServers()}]
+  var footer:[NSView]=[action("切换账号"){[weak self] in self?.app?.requestAccountSwitch()}]
   if connection.isAdministrator{footer.append(action("账号管理"){[weak self] in self?.openAdministration()})}
   footer.append(action("修改密码"){[weak self] in self?.changeOwnPassword()})
   footer += [NSView(),action("退出登录"){[weak self] in self?.logout()}]
@@ -225,20 +183,16 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
   return error.localizedDescription
  }
  private func showServers(){
-  operation=UUID();loading=false;password.stringValue="";username.stringValue="";selected=nil;server=nil;games=[];pin=nil;invitationName=nil;feedback="";feedbackIsError=false
+  operation=UUID();loading=false;password.stringValue="";username.stringValue="";selected=nil;server=nil;pin=nil;invitationName=nil;feedback="";feedbackIsError=false
   page=store.connections.isEmpty ? .address:.servers;render()
  }
  private func newServer(){showServers();address.stringValue="";page = .address;render()}
  private func choose(_ connection:SharedConnection){
   loading=false
   operation=UUID();selected=connection;server=SharedServerInfo(name:connection.name,serverID:connection.serverID,version:"");address.stringValue=connection.address;username.stringValue="";password.stringValue="";pin=connection.certificateSHA256;feedback="";feedbackIsError=false
-  let authenticated=(try? app?.sharedToken(for:connection)) != nil
-  username.stringValue=SharedNavigation.loginUsername(connection:connection,authenticated:authenticated)
-  switch SharedNavigation.destination(accountRequested:accountRequested,authenticated:authenticated){
-  case .account:page = connection.isAdministrator ? .catalog:.account;loading=false;render();loadCatalog()
-  case .catalog:page = .retry;render();loadCatalog()
-  case .login:page = .login;render()
-  }
+  if accountRequested,let token=try? app?.sharedToken(for:connection),!token.isEmpty {
+   page = .account;render()
+  }else{page = .login;render()}
  }
  private func connect(){
   do {
@@ -271,10 +225,12 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
     do {
      let response=try result.get()
      guard response.serverID==info.serverID else{throw LibraryError("服务器身份不匹配，请重新选择服务器。")}
-     var connection=SharedConnection(name:info.name,address:client.address.absoluteString,serverID:response.serverID,accountID:response.user.id,username:response.user.username,isAdministrator:response.user.admin,certificateSHA256:self.pin,rememberLogin:false)
+     var connection=SharedConnection(name:info.name,address:client.address.absoluteString,serverID:response.serverID,accountID:response.user.id,username:response.user.username,isAdministrator:response.user.admin,certificateSHA256:self.pin,rememberLogin:self.rememberLogin.state == .on)
      if let existing=self.store.connections.first(where:{$0.serverID==connection.serverID && $0.accountID==connection.accountID}){connection.id=existing.id}
      try self.store.save(connection);app.sharedAccessTokens[connection.id]=response.token
-     self.password.stringValue="";self.selected=connection;self.loading=false;self.games=[];self.page = self.accountRequested && !connection.isAdministrator ? .account:.catalog;self.render();if !self.accountRequested || connection.isAdministrator{self.loadCatalog()}
+     self.password.stringValue="";self.selected=connection
+     self.start("正在加载游戏库…")
+     app.didAuthenticateAccount(connection:connection,token:response.token,rememberLogin:self.rememberLogin.state == .on)
     }catch{
      let message=(error as? SharedRequestError)?.statusCode==401 ? "账号或密码不正确，请重试。":self.friendly(error)
      self.finish(message,error:true)
@@ -282,36 +238,8 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
    }}
   }catch{finish(friendly(error),error:true)}
  }
- private func loadCatalog(){
-  guard let connection=selected,let app else{return}
-  do {
-   guard let token=try app.sharedToken(for:connection) else{page = .login;loading=false;feedback="";render();return}
-   let client=try SharedAPI(address:connection.address,certificateSHA256:connection.certificateSHA256);api=client;operation=UUID();let id=operation
-   start("正在加载游戏库…")
-   client.catalog(token:token){[weak self] result in DispatchQueue.main.async {
-    guard let self,!self.closed,self.operation==id else{return}
-    self.loading=false
-    do{
-     self.games=try result.get().games;self.page = self.accountRequested && !connection.isAdministrator ? .account:.catalog;self.feedback="";self.feedbackIsError=false;self.render()
-     if self.accountRequested && connection.isAdministrator{self.accountRequested=false;self.openAdministration()}
-     for remote in self.games {
-      if let game=app.store.games.first(where:{$0.shared?.serverID==connection.serverID && $0.shared?.accountID==connection.accountID && $0.shared?.gameID==remote.id}){app.fetchSharedDefaultCover(remote,connection:connection,game:game)}
-     }
-    }
-    catch{
-     if (error as? SharedRequestError)?.statusCode==401{self.page = .login;self.feedback="登录已过期"}
-     else{self.page = .retry;self.feedback=self.friendly(error)}
-     self.feedbackIsError=true;self.render()
-    }
-   }}
-  }catch{loading=false;page = .login;feedback="请重新登录以继续。";feedbackIsError=true;render()}
- }
- private func playShared(_ remote:SharedCatalogGame,entry:Int){
-  guard let app,let connection=selected,remote.entries.indices.contains(entry),!app.busy else{return}
-  do{let game=try app.applyKnownMetadata(app.store.addShared(remote,entry:remote.entries[entry],connection:connection,mountRoot:app.root));app.fetchSharedDefaultCover(remote,connection:connection,game:game);app.showLibrary();app.launch(game)}catch{finish(friendly(error),error:true)}
- }
  private func passwordChanged(){
-  guard let app,let connection=selected else{return};app.clearSharedLogin(connection);administrationWindow?.close();administrationWindow=nil;password.stringValue="";games=[];page = .login;feedback="密码已修改，请重新登录。";feedbackIsError=false;render()
+  guard let app else{return};app.requestAccountSwitch()
  }
  private func changeOwnPassword(){
   guard let connection=selected,let app else{return}
@@ -339,10 +267,11 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
      self.administratorSetupWindow=AdministratorSetupWindowController(invitation:invitation){[weak self] response in
       guard let self,let app=self.app else{return}
       do{
-       var connection=SharedConnection(name:invitation.name ?? "GameShelf",address:invitation.address,serverID:response.serverID,accountID:response.user.id,username:response.user.username,isAdministrator:response.user.admin,certificateSHA256:invitation.certificateSHA256,rememberLogin:false)
+       var connection=SharedConnection(name:invitation.name ?? "GameShelf",address:invitation.address,serverID:response.serverID,accountID:response.user.id,username:response.user.username,isAdministrator:response.user.admin,certificateSHA256:invitation.certificateSHA256,rememberLogin:self.rememberLogin.state == .on)
        if let existing=self.store.connections.first(where:{$0.serverID==connection.serverID && $0.accountID==connection.accountID}){connection.id=existing.id}
        try self.store.save(connection);app.sharedAccessTokens[connection.id]=response.token
-       self.selected=connection;self.loading=false;self.page = .catalog;self.render();self.loadCatalog()
+       self.selected=connection;self.start("正在加载游戏库…")
+       app.didAuthenticateAccount(connection:connection,token:response.token,rememberLogin:self.rememberLogin.state == .on)
       }catch{self.finish(error.localizedDescription,error:true)}
      }
      self.administratorSetupWindow?.showWindow(nil);self.administratorSetupWindow?.window?.makeKeyAndOrderFront(nil);return
@@ -356,26 +285,11 @@ final class SharedLibraryWindowController:NSWindowController,NSWindowDelegate,NS
   guard let connection=selected,connection.isAdministrator,let app else{return}
   do{
    if administrationWindow==nil{administrationWindow=try SharedAdministrationWindowController(app:app,connection:connection,changed:{[weak self] in
-    guard let self,!self.closed,self.selected?.id==connection.id else{return};self.loadCatalog()
+    guard let self,!self.closed,self.selected?.id==connection.id else{return};self.app?.refreshAccountLibrary()
    },onClose:{[weak self] in self?.administrationWindow=nil},signedOut:{[weak self] in self?.passwordChanged()})}
    administrationWindow?.showWindow(nil);administrationWindow?.window?.makeKeyAndOrderFront(nil)
   }catch{status(error.localizedDescription,error:true)}
  }
- private func bindPersonalLibrary(){
-  guard let connection=selected,let app else{return}
-  let alert=NSAlert();alert.messageText="绑定到 "+connection.username+"？"
-  alert.informativeText="游戏名称、封面、分类、收藏和时长将保存到「"+connection.name+"」的个人账号。游戏文件与存档位置保留。"
-  alert.addButton(withTitle:"绑定");alert.addButton(withTitle:"取消")
-  if alert.runModal() == .alertFirstButtonReturn{app.bindPersonalLibrary(to:connection);if page == .account{render()}}
- }
- private func logout(){
-  guard let connection=selected,let app else{return}
-  guard app.sharedSessions.isEmpty else{status("请先保存并退出正在运行的共享游戏。",error:true);return}
-  do{
-   if let token=try app.sharedToken(for:connection),let client=try? SharedAPI(address:connection.address,certificateSHA256:connection.certificateSHA256){api=client;client.request("/api/logout",method:"POST",token:token){(_:Result<SharedOK,Error>) in}}
-   app.sharedAccessTokens.removeValue(forKey:connection.id)
-   password.stringValue="";username.stringValue="";games=[];page = .login;feedback="";feedbackIsError=false;render()
-  }catch{status(friendly(error),error:true)}
- }
+ private func logout(){app?.requestAccountSwitch()}
 }
 struct SharedOK:Codable {var ok:Bool?=nil}

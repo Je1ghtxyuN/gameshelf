@@ -1,0 +1,20 @@
+{
+  "windowsLaunch": {
+    "entryPath": "Fixture.exe",
+    "isolation": "reviewed-relative-saves",
+    "saveProfileVerified": true,
+    "reviewedProfileID": "gameshelf.synthetic-relative-windows.v1",
+    "profileRevision": 1,
+    "entrySHA256": "23da1a8de2ea9c3aaf4b484b39357c4f41e8c5255f3bddcf5f45610b9003942b",
+    "rulesSHA256": "4817ddeea5d8d6b96ac6b9ca8a080e4f3f452d6deef329eb2a112b1f1f0d5f25",
+    "evidenceSHA256": "5d86fc7be6ad08c33c2c61fea46fd2e9d03fbd65249ea8ce4478aaac2eda78ec",
+    "sourceSignature": "0000000000000000000000000000000000000000000000000000000000000000",
+    "savePaths": [
+      {
+        "path": "savedata",
+        "kind": "directory"
+      }
+    ],
+    "synthetic": true
+  }
+}

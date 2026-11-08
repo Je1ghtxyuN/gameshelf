@@ -181,3 +181,9 @@ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ```
+## Ren’Py save-location test fixture
+
+`Contracts/Fixtures/renpy-8.3.7/savelocation.py` is from Ren’Py 8.3.7.25031702,
+copyright 2004–2025 Tom Rothamel. Its MIT license notice is retained in the file;
+the adjacent provenance record identifies the upstream source and digest.
+The GameShelf account adapter marks its deterministic runtime modification.

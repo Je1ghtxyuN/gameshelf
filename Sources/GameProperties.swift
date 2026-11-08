@@ -215,6 +215,23 @@ final class GamePropertiesController: NSWindowController, NSWindowDelegate {
    section("运行方式", value: modes[usesWine ? .wine : (nativeRenpy ? .renpy : game.entry.backend)] ?? game.entry.backend.rawValue)
    section("引擎", value: game.entry.engine)
    section("启动入口", value: game.entry.path)
+   if let logical=app.accountLibrary?.game(for:gameID) {
+    for platform in ["macos","windows","web"] {
+     let choices=logical.variants.filter{$0.platform==platform && $0.available}.flatMap{variant in variant.entries.filter{AccountLibraryGame.safeEntry($0,platform:platform)}.map{(variant,$0)}}
+     guard !choices.isEmpty else{continue}
+     let name=platform=="macos" ? "macOS 版本":platform=="windows" ? "Windows 版本":"Web 版本"
+     add(text(name,size:12,secondary:true))
+     let popup=NSPopUpButton();popup.addItem(withTitle:"自动选择")
+     popup.addItems(withTitles:choices.map{variant,entry in ((variant.version ?? variant.label).map{$0+" · "} ?? "")+entry.path})
+     if let preferred=logical.preferredEntries?[platform],let index=choices.firstIndex(where:{$0.0.id==preferred.variantID && $0.1.path==preferred.entryPath}){popup.selectItem(at:index+1)}
+     popup.isEnabled = !blocked && !running;add(popup)
+     button("保存"+name,enabled:!blocked && !running){[weak self,weak popup] in
+      guard let self,let popup,let account=self.app?.accountLibrary else{return}
+      let index=popup.indexOfSelectedItem-1
+      account.chooseEntry(self.gameID,platform:platform,variant:choices.indices.contains(index) ? choices[index].0:nil,entry:choices.indices.contains(index) ? choices[index].1:nil)
+     }
+    }
+   }
    button("查看运行日志", enabled: !blocked) { [weak self] in self?.perform { $0.showGameLogs($1) } }
    if let language=game.nativeLanguage{section("启动语言",value:"简体中文（"+language+"）")}
    if usesWine {
@@ -355,6 +372,7 @@ final class GamePropertiesController: NSWindowController, NSWindowDelegate {
   alert.buttons.first?.hasDestructiveAction = true
   alert.beginSheetModal(for: window) { [weak self] answer in
    guard answer == .alertFirstButtonReturn, let self, let app = self.app, !self.blocked, self.game != nil else { return }
+   if let account=app.accountLibrary,account.canonicalID(for:self.gameID) != nil{account.removeGame(self.gameID){[weak self] in self?.close()};return}
    do {
     try app.store.remove(self.gameID)
     if app.filter == "game:" + self.gameID.uuidString { app.filter = "all" }

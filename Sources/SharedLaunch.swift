@@ -8,6 +8,8 @@ struct SharedLease:Decodable {
  let game:SharedCatalogGame
  let profileKey:String
  let share:SharedSMBShare
+ var saveNamespace:SharedSaveNamespace?
+ var renpyLaunch:RenpyLaunchProof?
 }
 private struct SharedHeartbeat:Decodable {let leaseID:String;let expiresAt:Double}
 final class SharedRunningSession {
@@ -52,7 +54,12 @@ extension App {
    let device:String
    if let existing=UserDefaults.standard.string(forKey:"SharedDeviceID"){device=existing}else{device=UUID().uuidString;UserDefaults.standard.set(device,forKey:"SharedDeviceID")}
    setBusy(true,"正在连接共享游戏库…")
-   client.request("/api/games/"+ref.gameID+"/session",method:"POST",token:token,body:["deviceID":device]){[weak self] (result:Result<SharedLease,Error>) in
+   let canonical=accountLibrary?.canonicalID(for:game.id)
+   let compatibility=accountLibrary?.game(for:game.id)?.variants.first{$0.id==ref.gameID && $0.entries.contains(game.entry)}?.saveCompatibilityKey
+   let route=canonical.map{"/api/library/games/"+$0+"/session"} ?? ("/api/games/"+ref.gameID+"/session")
+   var sessionBody:[String:Any]=["deviceID":device]
+   if canonical != nil{sessionBody["variantID"]=ref.gameID;sessionBody["adapter"]="renpy-savedir-v1"}
+   client.request(route,method:"POST",token:token,body:sessionBody){[weak self] (result:Result<SharedLease,Error>) in
     guard let self else{return}
     switch result {
     case .failure(let error):self.preparationReady{self.setBusy(false,"");self.errorAlert(error)}
@@ -61,6 +68,13 @@ extension App {
       var mounted:MountedLibraryShare?
       do {
        guard Self.safeSharedID(lease.leaseID),lease.serverID==ref.serverID,lease.userID==ref.accountID,lease.game.id==ref.gameID,lease.game.entries.contains(game.entry),lease.expiresAt>Date().timeIntervalSince1970 else{throw LibraryError("服务器会话身份、有效期或游戏入口不匹配，未启动。")}
+       if let namespace=lease.saveNamespace {
+        guard let canonical else{throw LibraryError("此存档映射需要通过账号游戏库启动。")}
+        try namespace.validate(serverID:ref.serverID,accountID:ref.accountID,canonicalID:canonical,compatibilityKey:compatibility)
+        guard let proof=lease.renpyLaunch else{throw LibraryError("服务器未提供账号运行模块校验。")}
+        try proof.validate(namespace:namespace,entry:game.entry,platform:game.entry.backend == .native ? "macos":"windows")
+       }else if lease.renpyLaunch != nil{throw LibraryError("运行模块校验缺少账号存档映射。")
+       }
        let target=self.root.appendingPathComponent("NetworkMounts/"+ref.storageKey)
        let receipts=self.root.appendingPathComponent("NetworkReceipts")
        try FileManager.default.createDirectory(at:receipts,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -74,8 +88,10 @@ extension App {
        try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
        let mount=try NetworkLibraryMount.mount(share:lease.share,at:target);mounted=mount
        try NetworkLibraryMount.persistReceipt(mounted:mount,identityKey:ref.storageKey,to:receipt)
+       if let proof=lease.renpyLaunch{try proof.verify(view:mount.url)}
        guard mount.url.standardizedFileURL==URL(fileURLWithPath:game.folder).standardizedFileURL else{throw LibraryError("共享游戏挂载位置发生变化，未使用其他目录。")}
        _ = try SharedProfile.networkProfile(game:game)
+       if let namespace=lease.saveNamespace{_ = try RenpyAccountAdapter.locations(view:mount.url,relativePath:namespace.relativePath)}
        try FileManager.default.createDirectory(at:self.runtimeDataRoot(for:game),withIntermediateDirectories:true)
        self.preparationReady {
         guard !self.quitting else{self.discardShared(lease:lease,mount:mount,api:client,token:token);return}
@@ -121,7 +137,7 @@ extension App {
      session.api.request("/api/sessions/"+session.lease.leaseID,method:"DELETE",token:session.token){[weak self,weak session] (result:Result<SharedOK,Error>) in DispatchQueue.main.async {
      guard let self,let session,self.sharedSessions[id] === session else{return}
      switch result {
-     case .success:session.timer?.invalidate();self.sharedSessions.removeValue(forKey:id);self.showStatus("共享游戏已退出，个人会话已关闭。")
+     case .success:session.timer?.invalidate();self.sharedSessions.removeValue(forKey:id);self.accountLibrary?.scheduleSync();self.showStatus("共享游戏已退出，个人会话已关闭。")
      case .failure(let error):
       let status=(error as? SharedRequestError)?.statusCode
       if status==404 || status==401 || status==403 {

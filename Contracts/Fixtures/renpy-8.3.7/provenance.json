@@ -1,0 +1,6 @@
+{
+  "url": "https://raw.githubusercontent.com/renpy/renpy/8.3.7.25031702/renpy/savelocation.py",
+  "sha256": "7a84aea6ddccab67c7e004d94cd38092e4a910c15ccb6fabb44aecbde1108427",
+  "license": "MIT; original copyright and full permission notice retained in savelocation.py",
+  "purpose": "engine adapter conformance fixture; no commercial game data"
+}

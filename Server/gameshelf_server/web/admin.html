@@ -9,5 +9,6 @@
 <section><h2>2. Select and publish · 勾选发布</h2><div id="candidates"></div><button id="publish">Publish selected 发布所选</button></section>
 <section><h2>3. Accounts · 账号</h2><form id="user-form"><label>Username 用户名<input name="username" autocomplete="off" required></label><label>New password 新密码<input name="password" type="password" minlength="12" autocomplete="new-password" required></label><label class="check"><input name="admin" type="checkbox">Administrator 管理员</label><button>Create account 创建账号</button></form><div id="users"></div></section>
 <section><h2>4. Game grants · 游戏授权</h2><form id="grant-form"><label>Account 账号<select name="userID" required></select></label><label>Published game 已发布游戏<select name="gameID" required></select></label><button name="allow" value="true">Grant 授权</button><button name="allow" value="false">Revoke 撤销</button></form><div id="grants"></div></section>
+<section><h2>Platform editions · 平台版本关联</h2><label>Canonical game 主游戏<select id="link-canonical"></select></label><label>Edition to link 待关联版本<select id="link-variant"></select></label><p>Link explicitly; existing edition saves stay separate. 仅显式关联，保留各版本原存档；不启用跨版本存档共用。</p><button id="link-variants" type="button">Link edition 关联版本</button></section>
 <section><h2>Default covers · 默认封面</h2><div id="covers"></div></section>
 </div></main></body></html>

@@ -77,7 +77,12 @@ def tree_signature(root, limit=100000, source_root=None):
 
 from .accounts import AccountFeatures
 
-class Service(AccountFeatures,SharedWorkflow):
+from .unified_library import UnifiedLibrary
+from .launch_profiles import LaunchProfiles
+from .save_namespaces import SaveNamespaces
+from .migration_barriers import MigrationBarriers
+
+class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,AccountFeatures,SharedWorkflow):
     def __init__(self, state, driver, allowed_sources, clock=time.time, token_ttl=86400, lease_ttl=90):
         self.state = clean_path(state)
         self.allowed = [clean_path(p) for p in allowed_sources]
@@ -132,6 +137,12 @@ class Service(AccountFeatures,SharedWorkflow):
         self.server_id = self.db.execute("SELECT value FROM settings WHERE key='serverID'").fetchone()[0]
         self.dummy_salt = secrets.token_hex(16)
         self.initialize_accounts()
+        self.initialize_unified_library()
+        self.initialize_launch_profiles()
+        try:
+            self.initialize_save_namespaces()
+        except BaseException:
+            self.db.close(); raise
     def _external(self,operation):
         """Run slow I/O without retaining ANY recursive authority lock levels.
 
@@ -157,9 +168,25 @@ class Service(AccountFeatures,SharedWorkflow):
         if 'error' in result:
             raise result['error']
         return result.get('value')
-    def _open_driver(self,lease,lower,user,rules):
+    def _open_driver(self,lease,lower,user,rules,launch_profile=None,save_namespace=None):
         with self.driver_lock:
-            return self.driver.open(lease,lower,user,save_paths=rules)
+            if launch_profile:
+                from .reviewed_profiles import verify_source
+                if not callable(getattr(self.driver,'verify_launch_profile',None)):
+                    raise APIError(409,'Driver cannot verify reviewed account-view execution')
+                verify_source(lower,launch_profile,rules,[dict(path=launch_profile['entryPath'])])
+            if save_namespace:
+                from .save_profiles import verify_variant
+                if not callable(getattr(self.driver,'verify_save_namespace',None)):
+                    raise APIError(409,'Driver cannot safely expose reviewed canonical namespace')
+                verify_variant(lower,save_namespace['variant'],save_paths=rules)
+                share=self.driver.open(lease,lower,user,save_paths=rules,save_namespace=save_namespace)
+                self.driver.verify_save_namespace(lease,save_namespace)
+            else:
+                share=self.driver.open(lease,lower,user,save_paths=rules)
+            if launch_profile:
+                self.driver.verify_launch_profile(lease,launch_profile)
+            return share
     def close(self):
         self.db.close()
     def _user(self, row):
@@ -366,6 +393,11 @@ class Service(AccountFeatures,SharedWorkflow):
         lower = self._external(lambda:self._lower(row))
         if authorize:
             authorize()
+        encoded, existing = self._publication_plan(row, lower, save_paths)
+        return self._commit_publication(row, encoded, existing)
+    def _publication_plan(self, row, lower, save_paths=None):
+        """Validate publication without writes; caller retains the authority lock."""
+        candidate_id = row['id']
         from .privacy import normalize_rules
         if save_paths is not None and not isinstance(save_paths,list):
             raise APIError(400,'savePaths must be an array')
@@ -389,6 +421,10 @@ class Service(AccountFeatures,SharedWorkflow):
                     raise APIError(409,'Detected save exclusions changed; specify reviewed savePaths')
         if existing is None:
             existing = self.db.execute('SELECT * FROM games WHERE candidate_id=? AND signature=? AND save_paths=?', (candidate_id, row['signature'],encoded)).fetchone()
+        return encoded, existing
+    def _commit_publication(self, row, encoded, existing):
+        """Apply an already validated plan without releasing the authority lock."""
+        candidate_id = row['id']
         if existing:
             # Explicit selected publication may add a newly validated launcher
             # to unchanged source bytes. Keep edition identity/private saves and
@@ -400,8 +436,8 @@ class Service(AccountFeatures,SharedWorkflow):
                 existing=self.db.execute('SELECT * FROM games WHERE id=?',(existing['id'],)).fetchone()
             return self._game(existing)
         game_id = uid()
-        self.db.execute('INSERT INTO games(id,candidate_id,root_id,relative,title,entries,signature,save_paths) VALUES (?,?,?,?,?,?,?,?)',
-                        (game_id, candidate_id, row['root_id'], row['relative'], row['title'], row['entries'], row['signature'],encoded))
+        self.db.execute('INSERT INTO games(id,candidate_id,root_id,relative,title,entries,signature,save_paths,edition_label) VALUES (?,?,?,?,?,?,?,?,?)',
+                        (game_id, candidate_id, row['root_id'], row['relative'], row['title'], row['entries'], row['signature'],encoded,self._edition_label(row)))
         return self._game(self.db.execute('SELECT * FROM games WHERE id=?', (game_id,)).fetchone())
     @locked
     def grant(self, user_id, game_id, allowed):
@@ -445,12 +481,14 @@ class Service(AccountFeatures,SharedWorkflow):
         except Exception:
             raise APIError(503,'Share shutdown pending; retry later') from None
     @locked
-    def session(self, user, game_id, device, *, token=None):
+    def session(self, user, game_id, device, *, token=None, adapter=None):
         text(device, 128)
         if token is not None and self.authenticate(token)['id'] != user['id']:
             raise APIError(401,'Token/account mismatch')
         self._permitted(user, game_id)
-        old = self.db.execute("SELECT * FROM leases WHERE user_id=? AND game_id=? AND status!='closed'", (user['id'], game_id)).fetchone()
+        canonical = self._canonical(game_id)
+        self._assert_no_migration(user['id'],canonical)
+        old = self.db.execute("SELECT * FROM leases WHERE user_id=? AND canonical_id=? AND status!='closed'", (user['id'], canonical)).fetchone()
         if old:
             if old['status']=='opening':
                 raise APIError(409,'Workspace is being provisioned')
@@ -458,19 +496,33 @@ class Service(AccountFeatures,SharedWorkflow):
                 raise APIError(409, 'Game already has a write lease; release it first')
             self._revoke(old)
         game = self.db.execute('SELECT * FROM games WHERE id=?', (game_id,)).fetchone()
+        launch_profile=self._launch_profile_for_game(game)
+        save_namespace=self._namespace_for_game(user,game,canonical)
+        if save_namespace and adapter!=save_namespace['adapter']:
+            raise APIError(409,'Client must explicitly support renpy-savedir-v1 arguments, fixed environment and reviewed runtime mitigation')
         lower = self._external(lambda:self._lower(game))
         if token is not None:
             self.authenticate(token)
         self._permitted(user,game_id)
+        if self._launch_profile_for_game(game)!=launch_profile:
+            raise APIError(409,'Reviewed launch profile changed during source validation')
+        # Linking may have changed while filesystem validation released the lock.
+        canonical = self._canonical(game_id)
+        self._assert_no_migration(user['id'],canonical)
+        if self._namespace_for_game(user,game,canonical)!=save_namespace:
+            raise APIError(409,'Canonical namespace review changed during validation')
         # Another request may have reserved the writer during metadata reads.
-        if self.db.execute("SELECT 1 FROM leases WHERE user_id=? AND game_id=? AND status!='closed'",(user['id'],game_id)).fetchone():
+        if self.db.execute("SELECT 1 FROM leases WHERE user_id=? AND canonical_id=? AND status!='closed'",(user['id'],canonical)).fetchone():
             raise APIError(409,'Game already has a write lease')
         lease = dict(id=uid(), user_id=user['id'], game_id=game_id, device=device,
-                     expires=float(self.clock()+self.lease_ttl), status='opening',
+                     expires=float(self.clock()+self.lease_ttl), status='opening', canonical_id=canonical,save_namespace=json.dumps({k:save_namespace[k] for k in ('key','relativePath','adapter','serverID','userID','canonicalID','compatibilityKey')},sort_keys=True) if save_namespace else '',
                      token_digest=hashlib.sha256(token.encode()).hexdigest() if token else '')
-        self.db.execute('INSERT INTO leases(id,user_id,game_id,device,expires,status,token_digest) VALUES (:id,:user_id,:game_id,:device,:expires,:status,:token_digest)', lease)
+        self.db.execute('INSERT INTO leases(id,user_id,game_id,device,expires,status,token_digest,canonical_id,save_namespace) VALUES (:id,:user_id,:game_id,:device,:expires,:status,:token_digest,:canonical_id,:save_namespace)', lease)
         try:
-            share = self._external(lambda:self._open_driver(lease,lower,user,json.loads(game['save_paths'])))
+            share = self._external(lambda:self._open_driver(lease,lower,user,json.loads(game['save_paths']),launch_profile,save_namespace))
+        except APIError:
+            self._revoke(lease)
+            raise
         except Exception:
             self._revoke(lease)
             raise APIError(503, 'Workspace could not be exported') from None
@@ -486,8 +538,16 @@ class Service(AccountFeatures,SharedWorkflow):
             raise
         lease['expires'] = float(self.clock()+self.lease_ttl)
         self.db.execute("UPDATE leases SET status='active', expires=? WHERE id=?", (lease['expires'], lease['id']))
-        return dict(leaseID=lease['id'], expiresAt=lease['expires'], serverID=self.server_id,
+        result=dict(leaseID=lease['id'], expiresAt=lease['expires'], serverID=self.server_id,
                     userID=user['id'], game=self._game(game), profileKey=f'{self.server_id}/{user["id"]}/{game_id}', share=share)
+        if launch_profile:
+            from .reviewed_profiles import launch_evidence
+            result['windowsLaunch']=launch_evidence(launch_profile)
+        if save_namespace:
+            result['saveNamespace']=self._namespace_public(save_namespace)
+            result['renpyLaunch']=self._namespace_renpy_proof(save_namespace,game)
+            if save_namespace['variant']['platform']=='windows': result['windowsLaunch']=self._namespace_windows_proof(save_namespace,game)
+        return result
     def _lease(self, user, lease_id):
         row = self.db.execute("SELECT * FROM leases WHERE id=? AND user_id=? AND status!='closed'", (lease_id, user['id'])).fetchone()
         if not row:

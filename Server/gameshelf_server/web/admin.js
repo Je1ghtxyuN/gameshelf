@@ -28,6 +28,8 @@ async function refresh() {
   const users = (await api('/api/admin/users')).users;
   const games = (await api('/api/admin/games')).games;
   const grants = (await api('/api/admin/grants')).grants;
+  choices($('link-canonical'), games, g => g.title + ' · ' + g.id);
+  choices($('link-variant'), games, g => g.title + ' · ' + g.id);
   $('roots').replaceChildren(...roots.map(r => {
     const row = node('div', r.title + ' · ' + r.path);
     row.append(button('Scan 扫描', async () => {
@@ -139,3 +141,10 @@ api('/api/server-info').then(info => {
   if (token) return;
   $('setup').hidden = !info.setupRequired; $('login').hidden = info.setupRequired;
 }).catch(e => message(e.message));
+
+$('link-variants').onclick = () => work(async () => {
+  const canonical = $('link-canonical').value, variant = $('link-variant').value;
+  if (!canonical || !variant || canonical === variant) throw new Error('Select two distinct editions 请选择两个不同版本');
+  await api('/api/admin/library/games/' + canonical + '/variants', 'POST', {variantIDs: [variant]});
+  await refresh();
+});

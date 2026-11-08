@@ -13,7 +13,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
  private var closed = false
  private var changeButtons: [NSButton] = []
  private var restriction: NSTextField?
- private var libraryCount: NSTextField?
+ private var rootsRequest = UUID()
+ private var administrationWindow: SharedAdministrationWindowController?
  private var observedPaths = ""
  private var volumeCache: [String: SettingsVolumeInfo] = [:]
  private var probing: Set<String> = []
@@ -23,7 +24,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
  private var validationID = UUID()
  private let probeQueue = DispatchQueue(label: "GameShelf.settings.volumes", qos: .utility, attributes: .concurrent)
  private let validationQueue = DispatchQueue(label: "GameShelf.settings.validation", qos: .userInitiated)
- private let titles = ["通用", "库与封面", "存储空间", "运行环境", "关于"]
+ private let titles = ["通用", "游戏库", "存储空间", "运行环境", "关于"]
 
  init(app: App) {
   self.app = app
@@ -51,6 +52,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
  func windowWillClose(_ notification: Notification) {
   closed = true
+  rootsRequest = UUID()
+  administrationWindow?.close()
   validationID = UUID()
   timer?.invalidate()
   timer = nil
@@ -69,7 +72,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                    pendingWeb: app?.pendingWebLaunch != nil)
  }
  private var pathSignature: String {
-  [app?.root.path ?? "", app?.runtimeRoot.path ?? "", wineSource.path].joined(separator: "\n")
+  [app?.root.path ?? "", app?.runtimeRoot.path ?? "", wineSource.path, app?.activeLibraryConnection?.id.uuidString ?? "local"].joined(separator: "\n")
  }
  private var wineSource: URL {
   let configured=URL(fileURLWithPath: UserDefaults.standard.string(forKey: "WineSource") ?? Wrapper.defaultSource.path)
@@ -90,7 +93,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
   changeButtons.forEach { $0.isEnabled = enabled }
   restriction?.stringValue = validating ? "正在验证所选位置…" : (activity.restrictionText ?? (app?.quitting == true ? "正在退出 GameShelf。" : "游戏运行或准备期间，位置与环境来源暂时不可更改。"))
   restriction?.isHidden = !validating && mayChange
-  libraryCount?.stringValue = "\(app?.store.games.count ?? 0) 款游戏"
  }
 
  private func buildLayout() {
@@ -247,7 +249,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
   changeButtons.removeAll()
   volumeViews.removeAll()
   restriction = nil
-  libraryCount = nil
+  rootsRequest = UUID()
   for view in form.arrangedSubviews { form.removeArrangedSubview(view); view.removeFromSuperview() }
   for (index, button) in navigation.enumerated() {
    let selected = index == selectedPage
@@ -264,15 +266,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
   }
   switch selectedPage {
   case 0:
-   let count = label("\(app.store.games.count) 款游戏", size: 30, weight: .semibold)
-   libraryCount = count
-   card("我的游戏库", detail: "已加入 GameShelf 的游戏", views: [count])
-   if let binding=(try? PersonalLibraryBindingStore(root:app.root))?.binding,
-      let connection=(try? SharedConnectionStore(root:app.root))?.connections.first(where:{$0.serverID==binding.serverID && $0.accountID==binding.accountID}) {
-    let name=connection.username+(connection.isAdministrator ? " · 管理员":"")
-    card("个人账号",views:[label(name,size:16,weight:.medium),actions([button("管理账号"){[weak app] in app?.showSharedAccount(connectionID:connection.id)},button("同步资料"){[weak app] in app?.syncPersonalLibrary(force:true)}])])
-   }
+   accountCard(app)
   case 1:
+   librarySourcesCard(app)
+   accountCard(app)
    let checkbox = SettingsActionButton("导入时自动联网匹配封面") {}
    checkbox.setButtonType(.switch)
    checkbox.state = UserDefaults.standard.object(forKey: "AutoOnlineCover") as? Bool == false ? .off : .on
@@ -307,6 +304,65 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
    card("GameShelf", detail: versionText, views: [image, label(versionText), label("macOS 15+", secondary: true), ActionButton("检查更新…"){[weak self] in self?.app?.checkForUpdates()}])
   }
   refreshActivity()
+ }
+
+ private func accountCard(_ app: App) {
+  guard let connection=app.activeLibraryConnection else {
+   card("账号",views:[actions([button("连接服务器…"){[weak app] in app?.requestAccountSwitch()}])])
+   return
+  }
+  var controls:[NSView]=[
+   button("账号设置"){[weak app] in app?.showSharedAccount(connectionID:connection.id)},
+   button("切换账号"){[weak app] in app?.requestAccountSwitch()},
+   button("退出登录"){[weak app] in app?.requestAccountSwitch()}
+  ]
+  if connection.isAdministrator {
+   controls.insert(button("账号管理"){[weak self] in self?.openAdministration(connection)},at:1)
+  }
+  card("账号",views:[label(connection.username,size:16,weight:.medium),label(connection.isAdministrator ? "管理员":"普通账号",secondary:true),actions(controls)])
+ }
+ private func openAdministration(_ connection: SharedConnection) {
+  guard let app,connection.isAdministrator,app.activeLibraryConnection?.id==connection.id else{return}
+  do {
+   if administrationWindow==nil {
+    administrationWindow=try SharedAdministrationWindowController(app:app,connection:connection,
+     changed:{[weak app] in app?.refreshAccountLibrary()},
+     onClose:{[weak self] in self?.administrationWindow=nil},
+     signedOut:{[weak app] in app?.requestAccountSwitch()})
+   }
+   administrationWindow?.showWindow(nil);administrationWindow?.window?.makeKeyAndOrderFront(nil)
+  }catch{report(error.localizedDescription)}
+ }
+ private func librarySourcesCard(_ app: App) {
+  guard let connection=app.activeLibraryConnection else {
+   var contents:[NSView]=[]
+   do {
+    let discovery=try DiscoveryStore(root:app.root)
+    for source in discovery.sources{contents += [label(source.title),path(URL(fileURLWithPath:source.path))]}
+   }catch{contents.append(label(error.localizedDescription,secondary:true))}
+   contents.append(actions([button("管理游戏文件夹…"){[weak app] in app?.showAccountDiscovery()}]))
+   card("游戏文件夹",views:contents)
+   return
+  }
+  let roots=label("正在读取…",secondary:true)
+  var contents:[NSView]=[label(connection.name,size:16,weight:.medium),label(connection.address,size:12,secondary:true),roots]
+  var controls:[NSView]=[button("刷新游戏库"){[weak app] in app?.refreshAccountLibrary()}]
+  if connection.isAdministrator{controls.append(button("管理服务器文件夹…"){[weak app] in app?.showAccountDiscovery()})}
+  contents.append(actions(controls));card("服务器游戏文件夹",views:contents)
+  let ticket=rootsRequest
+  do {
+   guard let token=try app.sharedToken(for:connection) else{roots.stringValue="请重新登录。";return}
+   let api=try SharedAPI(address:connection.address,certificateSHA256:connection.certificateSHA256)
+   api.request("/api/library/roots",token:token){[weak self,weak roots] (result:Result<SettingsLibraryRoots,Error>) in
+    DispatchQueue.main.async {
+     guard let self,!self.closed,self.rootsRequest==ticket,self.app?.activeLibraryConnection?.id==connection.id,let roots else{return}
+     switch result {
+     case .success(let value):roots.stringValue=value.roots.isEmpty ? "尚未配置文件夹":value.roots.map{$0.title}.joined(separator:"\n")
+     case .failure(let error):roots.stringValue=error.localizedDescription
+     }
+    }
+   }
+  }catch{roots.stringValue=error.localizedDescription}
  }
 
  private func storageCard(_ title: String, detail: String, url: URL, runtime: Bool) {
@@ -491,4 +547,10 @@ private final class SettingsNavigationButtonCell: NSButtonCell {
  override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
   super.drawInterior(withFrame: cellFrame.insetBy(dx: 12, dy: 0), in: controlView)
  }
+}
+
+// The public root list deliberately has no server filesystem paths.
+private struct SettingsLibraryRoots: Decodable {
+ struct Root: Decodable { let id: String; let title: String }
+ let roots: [Root]
 }

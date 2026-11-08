@@ -53,7 +53,8 @@ enum VisualNovelProbe {
    "install", "installer", "unins", "uninstall", "uninstaller", "dxsetup", "vcredist",
    "vcredist_x86", "vcredist_x64", "vc_redist.x86", "vc_redist.x64",
    "dotnet", "dotnetfx", "unitycrashhandler", "unitycrashhandler32",
-   "unitycrashhandler64", "crashreport", "crashreporter"
+   "unitycrashhandler64", "crashreport", "crashreporter",
+   "notification_helper", "chrome_crashpad_handler", "crashpad_handler"
   ]
   // Keep prefix checks at recognizable token/number boundaries. A real title
   // such as CustomAdventure or ConfigurationStory is not a settings tool.

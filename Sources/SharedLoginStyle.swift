@@ -13,7 +13,7 @@ final class SharedLoginArtwork:NSView {
    (value as NSString).draw(in:NSRect(x:16,y:y,width:bounds.width-32,height:42),withAttributes:[.font:NSFont.systemFont(ofSize:size,weight:weight),.foregroundColor:NSColor.white.withAlphaComponent(alpha),.paragraphStyle:style])
   }
   text("GameShelf",y:bounds.height*0.45,size:26,weight:.semibold)
-  text("共享游戏库",y:bounds.height*0.38,size:14,weight:.regular,alpha:0.8)
+  text("游戏库",y:bounds.height*0.38,size:14,weight:.regular,alpha:0.8)
  }
 }
 

@@ -136,6 +136,14 @@ import Foundation
     try check(!VisualNovelProbe.isAuxiliaryExecutable(name), "valid or ambiguous name filtered: \(name)")
    }
   }
+  test("NW.js notification and crashpad helpers are exact names only") { _ in
+   for name in ["notification_helper.exe", "NOTIFICATION_HELPER.EXE", "chrome_crashpad_handler.exe", "Chrome_Crashpad_Handler.EXE", "crashpad_handler.exe", "CRASHPAD_HANDLER.EXE"] {
+    try check(VisualNovelProbe.isAuxiliaryExecutable(name), "NW.js helper retained: \(name)")
+   }
+   for name in ["notification_helperAdventure.exe", "notification_helper_story.exe", "chrome_crashpad_handlerStory.exe", "crashpad_handlerAdventure.exe", "notification_helper.txt", "CustomAdventure.exe", "ConfigurationStory.exe"] {
+    try check(!VisualNovelProbe.isAuxiliaryExecutable(name), "non-exact or real title filtered: \(name)")
+   }
+  }
   test("Chinese launch choices sort first while retaining Japanese and ambiguity") { _ in
    let input = ["日本語.exe", "Story.exe", "Novel_CHS.exe", "Novel_CN.exe", "Novel中文版.exe", "Novel汉化.exe", "Novel_sc.exe"]
    let output = VisualNovelProbe.orderedExecutables(input)

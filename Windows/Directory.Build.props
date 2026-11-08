@@ -1,0 +1,4 @@
+<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><LangVersion>latest</LangVersion><RestorePackagesWithLockFile>true</RestorePackagesWithLockFile><Deterministic>true</Deterministic></PropertyGroup><PropertyGroup Condition="'$(Configuration)' == 'Release'">
+  <DebugType>none</DebugType><DebugSymbols>false</DebugSymbols>
+  <PathMap>$(MSBuildThisFileDirectory)=/_/GameShelf/Windows/</PathMap>
+</PropertyGroup></Project>

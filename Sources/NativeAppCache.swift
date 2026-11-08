@@ -28,6 +28,7 @@ enum NativeAppCache {
   var cachedSignedFingerprint: String?
   var signingProfile: String?
   var bootstrapProfile: String?
+  var reviewedRuntimeProfile: String?
  }
  private struct BundleInfo {
   let plist: [String: Any]
@@ -53,9 +54,9 @@ enum NativeAppCache {
  private static func directory(_ url: URL) -> Bool {
   (try? attributes(url)[.type] as? FileAttributeType) == .typeDirectory
  }
- private static func bundle(_ app: URL) throws -> BundleInfo {
+ private static func bundle(_ app: URL, allowMountedRoot: Bool = false) throws -> BundleInfo {
   let plistURL = app.appendingPathComponent("Contents/Info.plist")
-  guard directory(app), app.pathExtension.lowercased() == "app",
+  guard directory(app), (app.pathExtension.lowercased() == "app" || allowMountedRoot),
         contains(app, plistURL.resolvingSymlinksInPath()), regular(plistURL),
         (try attributes(plistURL)[.size] as? NSNumber)?.int64Value ?? Int64.max <= 1024 * 1024 else {
    throw fail("无效的应用或 Info.plist。")
@@ -90,7 +91,8 @@ enum NativeAppCache {
   }
  }
  private static func receipt(_ source: URL, _ info: BundleInfo, _ game: Game,
-                             _ profile: String, _ payloads: [String], _ runtimeFingerprint: String) throws -> Receipt {
+                             _ profile: String, _ payloads: [String], _ runtimeFingerprint: String,
+                             reviewedRuntimeProfile: String? = nil) throws -> Receipt {
   let attrs = try attributes(info.executable)
   guard let size = attrs[.size] as? NSNumber, let date = attrs[.modificationDate] as? Date else {
    throw fail("无法读取主程序元数据。")
@@ -99,7 +101,8 @@ enum NativeAppCache {
                  infoSHA256: SHA256.hash(data: info.data).map { String(format: "%02x", $0) }.joined(),
                  executableSize: size.int64Value, executableMTime: date.timeIntervalSince1970,
                  profile: profile, payloads: payloads, runtimeFingerprint: runtimeFingerprint,
-                 bootstrapProfile: profile == "renpy-autorun-v1" ? NativeRenpyBootstrap.profile(source:source,executableName:info.executable.lastPathComponent):nil)
+                 bootstrapProfile: profile == "renpy-autorun-v1" && reviewedRuntimeProfile == nil ? NativeRenpyBootstrap.profile(source:source,executableName:info.executable.lastPathComponent):nil,
+                 reviewedRuntimeProfile: reviewedRuntimeProfile)
  }
  private struct RuntimeEntry: Encodable {
   let path: String
@@ -260,8 +263,15 @@ enum NativeAppCache {
   }
  }
  static func prepare(game: Game, root: URL,
+                     reviewedRuntimeProfile: String? = nil,
+                     verifyReviewedRuntime: ((URL) throws -> Void)? = nil,
                      runningCheck: (URL) -> Bool = NativeAppIdentity.isRunning(at:)) throws -> NativeAppLaunch {
   lock.lock(); defer { lock.unlock() }
+  if let review=reviewedRuntimeProfile {
+   let prefix="renpy-savedir-v1/",hash=String(review.dropFirst(prefix.count))
+   guard game.shared != nil,verifyReviewedRuntime != nil,review.hasPrefix(prefix),hash.utf8.count==64,
+         hash.utf8.allSatisfy({(48...57).contains($0)||(97...102).contains($0)}) else{throw fail("已审核运行库标识无效。")}
+  }else if verifyReviewedRuntime != nil{throw fail("运行库校验缺少审核标识。")}
   guard game.entry.backend == .native else { throw fail("仅支持 native 应用入口。") }
   try EntryPolicy.validate(game.entry)
   guard !game.entry.path.contains("\\"), !game.entry.path.unicodeScalars.contains(where: { $0.value < 32 }) else {
@@ -270,7 +280,10 @@ enum NativeAppCache {
   let folder = URL(fileURLWithPath: game.folder).standardizedFileURL.resolvingSymlinksInPath()
   let source = folder.appendingPathComponent(game.entry.path).standardizedFileURL.resolvingSymlinksInPath()
   guard contains(folder, source) else { throw fail("应用入口超出游戏目录。") }
-  let info = try bundle(source)
+  // A validated shared .app-root is mounted as an opaque share directory.
+  // Cached/local bundles still require their normal package suffix.
+  let mountedBundleRoot = game.shared != nil && game.entry.path == "."
+  let info = try bundle(source, allowMountedRoot: mountedBundleRoot)
   let local = root.standardizedFileURL
   try safeCachePath(local)
   let cacheRoot = local.appendingPathComponent("NativeApps")
@@ -290,6 +303,7 @@ enum NativeAppCache {
    windows = try fm.contentsOfDirectory(at: autorun, includingPropertiesForKeys: nil)
     .filter { $0.pathExtension.lowercased() == "exe" }.map { "Resources/autorun/" + $0.lastPathComponent }
   } else {
+   guard reviewedRuntimeProfile == nil else{throw fail("此运行库布局不支持账号 Ren’Py 审核。")}
    // Deliberately narrow: only explicitly observed, top-level Resources/*.pck files.
    let pcks = directory(resources) ? try fm.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil)
     .filter { $0.pathExtension.lowercased() == "pck" && regular($0) } : []
@@ -305,7 +319,7 @@ enum NativeAppCache {
   }
   let excluded = Set((payloads + windows).map { "Contents/" + $0 })
   let sourceRuntime = try runtimeSnapshot(source, excluding: excluded)
-  let expected = try receipt(source, info, game, profile, payloads, sourceRuntime.fingerprint)
+  let expected = try receipt(source, info, game, profile, payloads, sourceRuntime.fingerprint,reviewedRuntimeProfile:reviewedRuntimeProfile)
   let requiresSigning = try NativeAppIdentity.isMachO(info.executable)
   let destination = cacheRoot.appendingPathComponent(game.id.uuidString + ".app", isDirectory: true)
   let receiptURL = cacheRoot.appendingPathComponent(game.id.uuidString + ".json")
@@ -358,6 +372,9 @@ enum NativeAppCache {
          contains(stage, link.deletingLastPathComponent().resolvingSymlinksInPath()) else { throw fail("资源链接目标不安全。") }
    try fm.createSymbolicLink(atPath: link.path, withDestinationPath: source.appendingPathComponent("Contents/" + path).path)
   }
+  // Authenticate the byte-for-byte copy before the deliberate plist/adhoc-sign
+  // transformations. Published copies are subsequently checked by signed receipts.
+  try verifyReviewedRuntime?(stage)
   // Never write through a copied plist symlink.
   guard !isLink(stage.appendingPathComponent("Contents/Info.plist")) else { throw fail("缓存 Info.plist 不可为链接。") }
   var newInfo = info.plist; newInfo["CFBundleIdentifier"] = bundleID
@@ -368,8 +385,8 @@ enum NativeAppCache {
   let stagedRuntime = try runtimeSnapshot(stage, excluding: excluded)
   var bytes = stagedRuntime.bytes
   guard stagedRuntime.fingerprint == sourceRuntime.fingerprint,
-        try receipt(source, bundle(source), game, profile, payloads,
-                    runtimeSnapshot(source, excluding: excluded).fingerprint) == expected else {
+        try receipt(source, bundle(source, allowMountedRoot: mountedBundleRoot), game, profile, payloads,
+                    runtimeSnapshot(source, excluding: excluded).fingerprint,reviewedRuntimeProfile:reviewedRuntimeProfile) == expected else {
    throw fail("复制期间源应用发生变化，请重试。")
   }
   var publishedReceipt = expected

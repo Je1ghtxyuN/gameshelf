@@ -1,0 +1,34 @@
+name: Windows client
+on:
+  workflow_dispatch:
+  push:
+    paths: ['Windows/**', 'Contracts/**', '.github/workflows/windows-build.yml']
+  pull_request:
+    paths: ['Windows/**', 'Contracts/**', '.github/workflows/windows-build.yml']
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        working-directory: Windows
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.103
+            10.0.403
+      - run: dotnet run --project GameShelf.Core.Tests -p:RestoreLockedMode=true
+      - run: dotnet build GameShelf.LaunchFixture -c Release -p:RestoreLockedMode=true
+      - run: dotnet run --project GameShelf.Native.Tests -p:RestoreLockedMode=true
+      - run: dotnet restore GameShelf.Windows --locked-mode -p:Platform=x64
+      - run: dotnet publish GameShelf.Windows -c Release -p:Platform=x64 --no-restore -o .build/publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GameShelf-Windows-x64
+          path: Windows/.build/publish/
+          if-no-files-found: error
+          retention-days: 7

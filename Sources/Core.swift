@@ -126,6 +126,8 @@ struct GameCollection:Codable,Identifiable {
 }
 final class LibraryStore {
  let root:URL
+ private(set) var changeRevision:UInt64=0
+ var onChange:(()->Void)?
  var games:[Game]=[]
  private(set) var collections:[GameCollection]=[]
  private let fm=FileManager.default
@@ -169,6 +171,7 @@ final class LibraryStore {
   try encoder.encode(next).write(to:root.appendingPathComponent("collections.json"),options:.atomic)
   // Publish in memory only after the atomic write succeeds; failures leave prior state intact.
   collections=next
+  changeRevision &+= 1;onChange?()
  }
  func createCollection(name:String)throws->GameCollection {
   let value=GameCollection(name:try Self.collectionName(name),gameIDs:[])
@@ -211,6 +214,23 @@ final class LibraryStore {
  func save() throws {
   let encoder=JSONEncoder();encoder.outputFormatting=[.prettyPrinted,.sortedKeys]
   try encoder.encode(games).write(to:root.appendingPathComponent("library.json"),options:.atomic)
+  changeRevision &+= 1;onChange?()
+ }
+ /// Only account-scoped caches may be replaced from a server snapshot. The
+ /// original pre-account store is never a synchronization destination.
+ func replaceAccountLibrary(games next:[Game],collections groups:[GameCollection])throws {
+  guard fm.fileExists(atPath:root.appendingPathComponent("account-identity.json").path),Set(next.map(\.id)).count==next.count else{throw LibraryError("不能替换未绑定账号的原游戏库。")}
+  try Self.validateCollections(groups)
+  let encoder=JSONEncoder();encoder.outputFormatting=[.prettyPrinted,.sortedKeys]
+  let gameBytes=try encoder.encode(next),groupBytes=try encoder.encode(groups)
+  let gameFile=root.appendingPathComponent("library.json"),groupFile=root.appendingPathComponent("collections.json")
+  let previous=try? Data(contentsOf:gameFile)
+  try gameBytes.write(to:gameFile,options:.atomic)
+  do{try groupBytes.write(to:groupFile,options:.atomic)}catch{
+   if let previous{try? previous.write(to:gameFile,options:.atomic)}else{try? fm.removeItem(at:gameFile)}
+   throw error
+  }
+  games=next;collections=groups
  }
  func add(source:URL,candidate:Candidate) throws -> Game {
   try EntryPolicy.validate(candidate)

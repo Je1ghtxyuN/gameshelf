@@ -266,6 +266,15 @@ import CryptoKit
   try runtimeFingerprintTests(base)
   let root = base.appendingPathComponent("Local"), game = try fixture(base)
   let source = URL(fileURLWithPath: game.folder).resolvingSymlinksInPath(), info = source.appendingPathComponent("Contents/Info.plist")
+  var mounted=try fixture(base,"Mounted native bundle")
+  let mountedRoot=base.appendingPathComponent("network-share-root")
+  try fm.moveItem(at:URL(fileURLWithPath:mounted.folder),to:mountedRoot)
+  mounted.folder=mountedRoot.path;mounted.originalFolder=mountedRoot.path
+  mounted.shared=SharedGameReference(connectionID:UUID(),serverID:"fixture-server",accountID:"fixture-user",gameID:String(repeating:"a",count:32))
+  let mountedCache=try NativeAppCache.prepare(game:mounted,root:root)
+  try check(mountedCache.cached && fm.fileExists(atPath:mountedCache.app.appendingPathComponent("Contents/MacOS/engine").path),"shared native .app root must work when SMB mount has no .app suffix")
+  var untrustedDirectory=mounted;untrustedDirectory.shared=nil
+  try rejects("unshared arbitrary non-package directory") { _ = try NativeAppCache.prepare(game:untrustedDirectory,root:root) }
   let original = try Data(contentsOf: info)
   let launch = try NativeAppCache.prepare(game: game, root: root)
   try check(launch.cached, "recognized RenPy must cache")

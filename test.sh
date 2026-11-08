@@ -35,15 +35,24 @@ run_swift VerifiedGameMetadata Sources/Core.swift Sources/CoverArt.swift Sources
 for name in PreparationTask ImportProgress Collection Rename; do run_swift "$name" Sources/Core.swift; done
 run_swift MZSaveArchive Sources/Core.swift Sources/MZSaveMigration.swift
 run_swift NativeAppCache Sources/Core.swift Sources/NativeAppCache.swift Sources/NativeAppIdentity.swift Sources/NativeRenpyBootstrap.swift -framework AppKit
+run_swift NativeReviewedCache Sources/Core.swift Sources/NativeAppCache.swift Sources/NativeAppIdentity.swift Sources/NativeRenpyBootstrap.swift -framework AppKit
 run_swift NativeAppIdentity Sources/Core.swift Sources/NativeAppCache.swift Sources/NativeAppIdentity.swift Sources/NativeRenpyBootstrap.swift -framework AppKit
 run_swift NativeRenpyBootstrap Sources/Core.swift Sources/NativeAppCache.swift Sources/NativeAppIdentity.swift Sources/NativeRenpyBootstrap.swift -framework AppKit
 run_swift NativeGameSaves Sources/Core.swift Sources/MZSaveMigration.swift Sources/NativeGameSaves.swift
+run_swift RenpyAccountAdapter Sources/Core.swift Sources/RenpyAccountAdapter.swift
+run_swift RenpyLaunchProof Sources/Core.swift Sources/RenpyAccountAdapter.swift Sources/RenpyLaunchProof.swift
 run_swift UnityCursorAdapter Sources/Core.swift Sources/UnityCursorAdapter.swift
 run_swift SettingsModel Sources/SettingsModel.swift
 run_swift NativeVolumePolicy Sources/NativeVolumePolicy.swift
 run_swift LibraryGridGeometry Sources/LibraryGrid.swift -framework AppKit
 run_swift PlaytimeStore Sources/PlaytimeStore.swift
 run_swift PlaytimeRecorder Sources/PlaytimeStore.swift Sources/PlaytimeRecorder.swift
+run_swift AccountLibrary Sources/Core.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift
+run_swift AccountLibraryPersistence Sources/Core.swift Sources/SharedScanSelection.swift Sources/PlaytimeStore.swift Sources/AccountLibrary.swift Sources/AccountLibraryPersistence.swift
+run_swift AccountMetadataSync Sources/Core.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/AccountMetadataSync.swift
+run_swift AccountLibraryMigration Sources/Core.swift Sources/LibraryDiscovery.swift Sources/SharedLibrary.swift Sources/PersonalLibrary.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/AccountLibraryMigration.swift Sources/AccountOwnerTransition.swift
+run_swift AccountOwnerTransition Sources/Core.swift Sources/LibraryDiscovery.swift Sources/SharedLibrary.swift Sources/PersonalLibrary.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/AccountLibraryMigration.swift Sources/AccountOwnerTransition.swift
+
 "$node_bin" --test Tests/MZSaveMigrationTests.js Tests/MZSaveBootstrapTests.js Tests/SharedWebStorageTests.js
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tests -p test_renpy_save_migration.py -q
 

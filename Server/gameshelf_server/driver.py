@@ -242,11 +242,18 @@ force directory mode = 0700
         elif existing.stdout.split(':')[3] != str(unix_uid):
             raise RuntimeError('Gateway session group mismatch')
         return anchor
-    def open(self, lease, lower, user, *, save_paths=None):
+    def open(self, lease, lower, user, *, save_paths=None, save_namespace=None):
         name, username = self.names(lease)
         paths = self.paths(lease)
         lower = clean_path(lower)
         tree_signature(lower)
+        namespace_data=None
+        if save_namespace:
+            from .save_profiles import verify_variant
+            from .namespace_storage import prepare_namespace
+            verify_variant(lower,save_namespace['variant'],save_paths=save_paths or [])
+            namespace_data=prepare_namespace(self.state,lease,user,save_namespace,
+                lambda game:self.paths(dict(lease,game_id=game))['upper'],chown=self.chown)
         unix_user = self._account(username, user['uid'])
         # Ancestors permit traversal only; the account's directory is private.
         workspaces = self.state/'workspaces'
@@ -283,12 +290,41 @@ force directory mode = 0700
             raise RuntimeError('Private profile must be a real directory')
         profile.mkdir(mode=0o700,exist_ok=True)
         self.chown(profile,user['uid'],user['uid'])
+        if save_namespace:
+            from .save_profiles import RELATIVE,apply_export_patches
+            from .reviewed_profiles import _check_path
+            apply_export_patches(paths['merged'],save_namespace['variant'],user,chown=self.chown)
+            _check_path(paths['merged'],RELATIVE,directory=True)
+            target=paths['merged']/RELATIVE
+            target.mkdir(mode=0o700,parents=True,exist_ok=True)
+            if next(target.iterdir(),None) is not None:
+                from .common import APIError
+                raise APIError(409,'Existing reserved profile saves require explicit backup/adoption')
+            self.chown(target.parent,user['uid'],user['uid']); self.chown(target,user['uid'],user['uid'])
+            self.run(['mount','--bind',str(namespace_data),str(target)])
+            self.run(['mount','-o','remount,bind,rw,nosuid,nodev,noexec',str(target)])
+            if not self.mount_probe(target): raise RuntimeError('Canonical save bind could not be verified')
+            self.verify_save_namespace(lease,save_namespace)
         password = secrets.token_urlsafe(32)
         self.run(['smbpasswd', '-s', '-c', str(self.config), '-a', username], input=password+'\n'+password+'\n')
         self.shares[name] = (paths['merged'], username, unix_user)
         self._write_config()
         self._control('reload-config')
         return dict(host=self.host, port=self.port, name=name, username=username, password=password)
+    def verify_launch_profile(self, lease, profile):
+        from .reviewed_profiles import verify_export
+        verify_export(self.paths(lease)['merged'],profile)
+    def verify_save_namespace(self,lease,namespace):
+        from .namespace_storage import validate_context
+        from .save_profiles import RELATIVE,verify_variant
+        from .reviewed_profiles import _check_path
+        from .common import APIError
+        validate_context(lease,namespace)
+        view=self.paths(lease)['merged']; target=clean_path(view/RELATIVE)
+        _check_path(view,RELATIVE,directory=True,required=True)
+        if not self.mount_probe(target): raise APIError(409,'Reviewed canonical save bind is not active')
+        verify_variant(view,namespace['variant'],export=True)
+
     def close(self, lease):
         name, username = self.names(lease)
         paths = self.paths(lease)
@@ -301,6 +337,15 @@ force directory mode = 0700
         self._write_config()
         self._control('reload-config')
         self._control('close-share', name)
+        if lease.get('save_namespace'):
+            import json
+            from .namespace_storage import validate_context
+            from .save_profiles import RELATIVE
+            context=json.loads(lease['save_namespace']); validate_context(lease,context)
+            target=clean_path(paths['merged']/RELATIVE)
+            if self.mount_probe(target):
+                self.run(['umount',str(target)])
+                if self.mount_probe(target): raise RuntimeError('Canonical save bind still mounted')
         # A successful normal unmount is the barrier for old open handles.
         # Busy or failed shutdown leaves the service lease in revoking state.
         for key in ('merged', 'lower'):

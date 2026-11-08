@@ -77,6 +77,23 @@ class Application:
                         return client_invitation(self.public_address,getattr(s,'display_name','GameShelf'),self.certificate_sha256)
                     except (ValueError,UnicodeError):
                         raise APIError(503,'Client invitation is not configured') from None
+                if method=='GET' and path=='/api/admin/save-profiles':
+                    return s.reviewed_save_profiles(user)
+                compatibility=re.fullmatch('/api/admin/library/games/'+ID+'/save-compatibility',path)
+                if method=='POST' and compatibility:
+                    return s.set_save_compatibility(user,compatibility[1],data,authorize=lambda:self.require_admin(token))
+                if method=='GET' and path=='/api/admin/library/editions':
+                    return s.library_editions(user)
+                if method=='GET' and path=='/api/admin/launch-profiles':
+                    return s.reviewed_launch_profiles(user)
+                launch_profile=re.fullmatch('/api/admin/games/'+ID+'/launch-profile',path)
+                if method=='POST' and launch_profile:
+                    return s.set_launch_profile(user,launch_profile[1],data,authorize=lambda:self.require_admin(token))
+                if method=='POST' and path=='/api/admin/library/add':
+                    return s.library_add(user,data,authorize=lambda:self.require_admin(token))
+                link=re.fullmatch('/api/admin/library/games/'+ID+'/variants',path)
+                if method=='POST' and link:
+                    return s.library_link(user,link[1],data)
                 if path == '/api/admin/roots':
                     if method == 'GET':
                         return dict(roots=s.roots())
@@ -115,6 +132,33 @@ class Application:
                     if method == 'POST':
                         s.grant(text(data.get('userID')), text(data.get('gameID')), data.get('allowed')); return {}
                 raise APIError(404, 'Endpoint not found')
+            if method=='GET' and path=='/api/library':
+                return s.library(user)
+            if method=='GET' and path=='/api/library/candidates':
+                return s.library_candidates(user)
+            if method=='POST' and path=='/api/library/candidates/ignore':
+                return s.library_ignore_candidates(user,data)
+            if method=='GET' and path=='/api/library/roots':
+                return s.library_roots()
+            if method=='POST' and path=='/api/library/collections':
+                return s.library_collection(user,data)
+            collection_remove=re.fullmatch('/api/library/collections/'+UUID_PATTERN,path)
+            if method=='DELETE' and collection_remove:
+                return s.library_remove_collection(user,collection_remove[1],data)
+            library_remove=re.fullmatch('/api/library/games/'+ID,path)
+            if method=='DELETE' and library_remove:
+                return s.library_remove(user,library_remove[1],data)
+            library_cover=re.fullmatch('/api/library/games/'+ID+'/cover',path)
+            if method=='GET' and library_cover:
+                return s.library_cover(user,library_cover[1])
+            preference=re.fullmatch('/api/library/games/'+ID+'/launch-preferences',path)
+            if method=='POST' and preference:
+                return s.library_launch_preference(user,preference[1],data,authorize=lambda:s.authenticate(token))
+            library_game=re.fullmatch('/api/library/games/'+ID+'/(metadata|playtime|session)',path)
+            if method=='POST' and library_game:
+                if library_game[2]=='metadata': return s.library_metadata(user,library_game[1],data)
+                if library_game[2]=='playtime': return s.library_playtime(user,library_game[1],data)
+                return s.library_session(user,library_game[1],data,token=token)
             if method == 'GET' and path == '/api/personal-library':
                 return s.personal_libraries(user)
             m=re.fullmatch('/api/personal-library/'+UUID_PATTERN,path)
@@ -132,7 +176,7 @@ class Application:
                 s.logout(token); return {}
             m = re.fullmatch('/api/games/'+ID+'/session', path)
             if method == 'POST' and m:
-                return s.session(user, m[1], data.get('deviceID'),token=token)
+                return s.session(user, m[1], data.get('deviceID'),token=token,adapter=data.get('adapter'))
             m = re.fullmatch('/api/sessions/'+ID+'/heartbeat', path)
             if method == 'POST' and m:
                 return s.heartbeat(user,m[1])

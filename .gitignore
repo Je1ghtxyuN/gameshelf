@@ -43,3 +43,18 @@ bootstrap-password
 *.sqlite3-*
 
 shared-scan-locations.json
+
+# Per-account caches and authentication are installation data
+AccountLibraries/
+SignedOut/
+account-session.json
+account-identity.json
+account-library.json
+playtime-outbox.json
+game-links.json
+projection-pending.json
+metadata-baselines.json
+owner-migration-owner.json
+owner-transition-staging.json
+owner-transition-accepted.json
+owner-migrations/

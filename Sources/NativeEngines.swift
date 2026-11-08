@@ -17,7 +17,8 @@ enum NativeEngines {
   guard let version=renpyVersion(folder) else{throw LibraryError("无法识别此游戏的 Ren’Py 版本，未尝试不匹配的引擎。")}
   let executable=engines.appendingPathComponent("renpy-"+version+"-sdk/renpy.app/Contents/MacOS/renpy")
   guard FileManager.default.fileExists(atPath:executable.path) else{throw LibraryError("需要对应版本的原生 Ren’Py 引擎："+version)}
-  let saves=data.appendingPathComponent("Saves/"+game.id.uuidString),logs=data.appendingPathComponent("Logs/"+game.id.uuidString)
+  let saveID=game.shared?.gameIdentity ?? game.id
+  let saves=data.appendingPathComponent("Saves/"+saveID.uuidString),logs=data.appendingPathComponent("Logs/"+game.id.uuidString)
   try FileManager.default.createDirectory(at:saves,withIntermediateDirectories:true)
   try FileManager.default.createDirectory(at:logs,withIntermediateDirectories:true)
   var environment=ProcessInfo.processInfo.environment

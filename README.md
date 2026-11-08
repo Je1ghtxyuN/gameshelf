@@ -41,26 +41,28 @@ After installing v1.3.0 or later, use **GameShelf → Check for Updates…** or 
 
 ## Getting started
 
-On first launch, choose **Local use**, **Connect to a shared library**, or **Create a shared library**. Local use needs no account. A newly deployed gateway provides a private, one-use administrator setup file; open it in the creation flow to choose your own administrator credentials.
+On first launch, connect to your server and sign in, or choose **Local use** without an account. A remembered session opens the library directly. Server, account, password, and library-folder controls live in **Settings**.
 
-1. Click **Scan games** and register a folder containing games. Local disks, external disks and mounted network folders work the same way.
-2. Scan it, tick the games you want and choose a launch entry where needed. Nothing is added automatically. **File → Add game manually** remains available for special cases.
-3. Start a game. Windows games automatically prepare Wine on first play and reuse the installed engine afterwards. On Apple Silicon, GameShelf guides you through Rosetta installation if needed. An existing **Wineskin `.app`** can still be selected in **Settings**. Native Mac games use their own app; Ren’Py adapters use the matching engine version.
-4. Click **Play** on the game card. Open **⋯ → Properties** to edit its name, launch settings, files, cover, or collections.
+1. Configure a library folder and click **Scan games**. Choose the games and launch entries to add; scanning never adds every executable automatically.
+2. In connected mode, scan results stay on the server. Other devices load the same candidates and account library without rescanning the NAS.
+3. Use the existing cover grid, collections, favorites, search, and **⋯ → Properties** to organize and launch games. A logical game can contain several platform editions: macOS selects its native edition first; Windows selects the Windows executable.
+4. An administrator manages accounts and access in **Settings**. Each account has its own library choices, playtime, and supported save profiles. Default names and covers belong to published games.
 
-NAS games stay in their original directory. Keep the network share mounted while playing; reconnecting the same share preserves library entries. The **Download locally** action creates an offline copy.
+Connected resources stay on the server. GameShelf opens an account-private network view and holds one writer session for a logical game across devices. Cross-platform saves use an explicitly reviewed engine adapter and compatible edition mapping. Unreviewed save locations require an adapter before connected launch.
 
-For account-based sharing, open **Shared library**, load the server invitation file (or enter its address), then sign in. Select games from the authorized catalog; no NAS account is required. The gateway uses encrypted SMB3 and an independent writable workspace for each account and game. Shared games run from the network; the local-copy action applies to directly imported games.
+Local use keeps a separate library and the game's ordinary save locations. Connecting a server does not upload or bind existing local games or saves automatically. Owner migration preserves the source and requires exact directory/entry mapping and a committed save-migration receipt.
 
-Batch sharing processes each selected game separately and reports failed titles without discarding successful items. Canonically equivalent Unicode directory and launcher names are matched across filesystems.
+Passwords are never stored. **Keep signed in** remembers a session token in a private application file on macOS and Windows Credential Vault on Windows. Signing out removes the remembered session.
 
-Games already in the local library can be shared through **⋯ → Share to library…**. Use **Game scan** for both local and shared libraries, including selections on the **Added** tab. Select cached results and choose **Share selected**; the gateway verifies only those directories before publication. Existing directory mappings are reused. Matching library roots are resolved automatically after verifying the selected entry fingerprint; an unmatched root requires a one-time folder selection. The shared catalog offers **Play** directly and remembers the selected game automatically. In **Account management**, create accounts and tick the games each account can play. There is no separate grants page. Accounts can change their own password; administrators can reset another account’s password. Password changes require running shared games to exit, revoke existing logins, and retain account identities, game access and saves.
+See [server setup](Server/README.md) and the [unified library contract](Contracts/unified-library-v2.json) for deployment and engine integration.
 
-See [server setup](Server/README.md) for accounts, scan/publish selection, access grants, certificates and save exclusions. Shared Windows games use private Wine user folders; managed native Ren’Py uses a private save directory. The verified RPG Maker MZ WebKit profile writes saves and settings to account-private network storage, with confirmation before exit. Other shared web and native engines need their own save adapter.
+Run `./test-account-integration.sh` for the AppKit account, scan, registration, and sync acceptance fixtures. All fixture data stays in temporary directories.
 
-Shared-library sign-in lasts for the current app session. Passwords and login tokens are not saved to disk, and the client does not access macOS Keychain. Saved server addresses and account names remain available after relaunch.
+## Windows development client
 
-In a connected library, the Account page can bind this Mac’s game metadata to your personal account. Names, collections, favorites, playtime and cover thumbnails sync separately from game files and saves. Shared-library default covers belong to published games; personal cover changes remain private.
+The Windows client uses **C# / .NET 10 and WinUI 3**. It follows the same login and library layout with native Windows window chrome, typography, navigation, and controls. Windows executables run natively, without Wine.
+
+Build instructions and acceptance coverage are in [Windows/BUILD.md](Windows/BUILD.md). The Windows client and unified-library protocol are development work on this branch; the release download above remains the published macOS build.
 
 Playtime is recorded while GameShelf is open, including background game time, and pauses when your Mac sleeps. Recording starts when this feature is enabled.
 

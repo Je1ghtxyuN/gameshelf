@@ -4,6 +4,7 @@ import CryptoKit
 /// Explicitly verified Godot project. Other projects keep their own data paths.
 enum NativeGameSaves {
  static func storageID(game:Game,localRoot:URL)throws->UUID {
+  if let shared=game.shared{return shared.gameIdentity}
   let source=URL(fileURLWithPath:game.originalFolder).appendingPathComponent(game.entry.path).standardizedFileURL.resolvingSymlinksInPath().path
   return try WebSaveBindings(root:localRoot,fileName:"NativeSaveBindings.json").resolve(source:source,initial:game.id)
  }

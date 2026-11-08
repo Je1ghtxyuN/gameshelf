@@ -63,3 +63,12 @@ test('default-cover upload uses admin published-game route with bounded JPEG JSO
   button.onclick(); await f.drain();
   assert.equal(f.requests.filter(r => r.route.endsWith('/cover')).length, 1);
 });
+test('explicit edition link submits selected IDs to administrator endpoint', async () => {
+  const f = fixture(); await f.drain();
+  f.get('link-canonical').value = 'a'.repeat(32);
+  f.get('link-variant').value = 'b'.repeat(32);
+  assert.equal(typeof f.get('link-variants').onclick, 'function');
+  f.get('link-variants').onclick(); await f.drain();
+  assert.deepEqual(f.requests.find(r => r.route === '/api/admin/library/games/' + 'a'.repeat(32) + '/variants').body,
+    {variantIDs: ['b'.repeat(32)]});
+});

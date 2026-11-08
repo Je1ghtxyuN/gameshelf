@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "serverID": "11111111111111111111111111111111",
+  "user": {
+    "id": "22222222222222222222222222222222",
+    "username": "fixture-player",
+    "admin": false
+  },
+  "games": [
+    {
+      "id": "33333333333333333333333333333333",
+      "title": "Example Adventure",
+      "revision": 2,
+      "favorite": true,
+      "collectionIDs": [
+        "55555555-5555-4555-8555-555555555555"
+      ],
+      "playtimeSeconds": 120,
+      "lastPlayed": 1794096000,
+      "variants": [
+        {
+          "id": "33333333333333333333333333333333",
+          "platform": "windows",
+          "entries": [
+            {
+              "path": "Play.exe",
+              "backend": "wine",
+              "engine": "unknown"
+            }
+          ],
+          "available": true
+        },
+        {
+          "id": "44444444444444444444444444444444",
+          "platform": "macos",
+          "entries": [
+            {
+              "path": "Example.app",
+              "backend": "native",
+              "engine": "unknown"
+            }
+          ],
+          "available": true
+        }
+      ],
+      "preferredEntries": {
+        "windows": {
+          "variantID": "33333333333333333333333333333333",
+          "entryPath": "Play.exe"
+        },
+        "macos": {
+          "variantID": "44444444444444444444444444444444",
+          "entryPath": "Example.app"
+        }
+      }
+    }
+  ],
+  "collections": [
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "name": "Adventures"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ extension App {
   do{_ = try PersonalLibraryBindingStore(root:root).bind(to:connection);syncPersonalLibrary(force:true)}catch{errorAlert(error)}
  }
  func syncPersonalLibrary(force:Bool=false){
+  guard accountLibrary==nil,store.root==root else{return}
   guard !quitting,!personalSyncing else{return}
   do{
    let bindingStore=try PersonalLibraryBindingStore(root:root)

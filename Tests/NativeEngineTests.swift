@@ -19,6 +19,11 @@ import Foundation
   guard plan.arguments==[source.path],plan.executable.path==engine.appendingPathComponent("renpy.app/Contents/MacOS/renpy").path,plan.directory.path==source.path else{fatalError("Bundled native executable must receive original NAS folder and working directory")}
   guard plan.environment["RENPY_PATH_TO_SAVES"] != nil,plan.environment["RENPY_LOG_BASE"] != nil else{fatalError("Managed saves/logs must be explicit")}
   guard plan.environment["RENPY_LANGUAGE"]=="schinese" else{fatalError("Existing Simplified Chinese translations must be selected")}
+  var sharedA=game;sharedA.shared=SharedGameReference(connectionID:UUID(),serverID:"fixture-server",accountID:"owner",gameID:String(repeating:"a",count:32))
+  var sharedB=sharedA;sharedB.id=UUID()
+  let a=try NativeEngines.renpySpec(game:sharedA,engines:engines,data:root.appendingPathComponent("SharedA"))
+  let b=try NativeEngines.renpySpec(game:sharedB,engines:engines,data:root.appendingPathComponent("SharedB"))
+  guard URL(fileURLWithPath:a.environment["RENPY_PATH_TO_SAVES"]!).lastPathComponent==URL(fileURLWithPath:b.environment["RENPY_PATH_TO_SAVES"]!).lastPathComponent else{fatalError("same account native RenPy saves depend on device record UUID")}
   print("PASS: native RenPy exact-version fallback, bundled launch, source reference, managed saves/logs")
  }
 }

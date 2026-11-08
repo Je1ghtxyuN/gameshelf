@@ -60,10 +60,10 @@ final class DiscoveryWindowController:NSWindowController,NSWindowDelegate,NSTabl
    table.addTableColumn(column)
   }
   let ignore=button("忽略所选"){[weak self] in self?.ignoreSelected()}
-  let addSelected=button("加入本机游戏库"){[weak self] in self?.addSelected()}
+  let addSelected=button("添加所选"){[weak self] in self?.addSelected()}
   ignoreAction=ignore;addAction=addSelected
   selectedCount.font = .systemFont(ofSize:12);selectedCount.textColor = .secondaryLabelColor
-  let share=button("共享所选"){[weak self] in self?.shareSelected()};shareAction=share
+  let share=button("共享所选"){[weak self] in self?.shareSelected()};shareAction=share;share.isHidden=true
   let footer=app.stack([selectedCount,NSView(),ignore,share,addSelected],spacing:10)
   let layout=app.stack([title,sourceRow,filterRow,scroll,footer],vertical:true,spacing:18);app.pin(layout,to:content,inset:26)
   for view in [sourceRow,filterRow,scroll,footer]{view.widthAnchor.constraint(equalTo:layout.widthAnchor).isActive=true}
