@@ -53,3 +53,14 @@ sealed class OwnedMappingBackend:GameShelf.Windows.IMappingBackend
     public Task<GameShelf.Windows.MappingReceipt> Create(SmbShare s,string d,Guid operation,CancellationToken ct){Port=s.Port;return Task.FromResult(new GameShelf.Windows.MappingReceipt(operation,d,s.Unc,s.Host,s.ShareName,s.Port,"fixture-credential"));}
     public Task Remove(GameShelf.Windows.MappingReceipt r){if(r.Port!=Port||r.Credential!="fixture-credential")throw new Exception("Wrong mapping identity");Removed++;return Task.CompletedTask;}
 }
+
+sealed class BoundFixtureView:ILeaseBoundWindowsView
+{
+    public bool Bound,Renewed,Disconnected;public bool RejectRenew=false;public int WaitDelayMs=0;
+    public Task BindLease(WindowsLeaseContext context,CancellationToken ct){context.Validate(DateTimeOffset.UtcNow);Bound=true;return Task.CompletedTask;}
+    public Task RenewLease(string id,double expires,CancellationToken ct){if(RejectRenew)throw new IOException("Fixture lost renewal acknowledgement");Renewed=true;return Task.CompletedTask;}
+    public Task<string> Connect(SmbShare share,CancellationToken ct){if(!Bound)throw new InvalidOperationException("Lease not bound before connect");return Task.FromResult("broker:fixture");}
+    public Task Disconnect(){Disconnected=true;return Task.CompletedTask;}
+    public Task<IGameProcess> Start(string root,string entry,CancellationToken ct)=>Task.FromResult<IGameProcess>(new BoundProcess(WaitDelayMs));
+    sealed class BoundProcess(int delay):IGameProcess {public Task Wait(CancellationToken ct)=>Task.Delay(delay,ct);public Task Stop()=>Task.CompletedTask;public ValueTask DisposeAsync()=>ValueTask.CompletedTask;}
+}

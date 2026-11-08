@@ -26,6 +26,16 @@ public sealed record LaunchLease(string LeaseID,double ExpiresAt,string ServerID
 }
 public interface IGameProcess: IAsyncDisposable {Task Wait(CancellationToken ct); Task Stop();}
 public interface IWindowsView {Task<string> Connect(SmbShare share,CancellationToken ct);Task Disconnect();Task<IGameProcess> Start(string root,string relative,CancellationToken ct);}
+public sealed record WindowsLeaseContext(string CanonicalID,string ServerID,string UserID,LibraryVariant Variant,LibraryEntry Entry,LaunchLease Lease)
+{
+    public void Validate(DateTimeOffset now){Safety.Id(CanonicalID);if(Variant.Platform!="windows"||!Variant.Available||!Safety.NativeEntry(Entry.Path,Entry.Backend)||!Variant.Entries.Contains(Entry))throw new InvalidDataException("Invalid Windows launch context");Lease.Validate(ServerID,UserID,Variant,Entry,now,CanonicalID);}
+    public override string ToString()=>"Windows lease context (redacted)";
+}
+public interface ILeaseBoundWindowsView:IWindowsView
+{
+    Task BindLease(WindowsLeaseContext context,CancellationToken ct);
+    Task RenewLease(string leaseID,double expiresAt,CancellationToken ct);
+}
 public sealed class GameRunner(ApiClient api,AccountStore store,IWindowsView view,AccountGate gate,string deviceID)
 {
     public async Task Run(LibraryGame game,CancellationToken ct)
@@ -35,6 +45,7 @@ public sealed class GameRunner(ApiClient api,AccountStore store,IWindowsView vie
         try{
             lease=await api.Send<LaunchLease>(HttpMethod.Post,$"/api/library/games/{Safety.Id(game.Id)}/session",new{variantID=variant.Id,deviceID,adapter=RenpyAdapter.Adapter},ct);
             lease.Validate(api.ServerID,api.UserID!,variant,entry,DateTimeOffset.UtcNow,game.Id);
+            if(view is ILeaseBoundWindowsView bound)await bound.BindLease(new(game.Id,api.ServerID,api.UserID!,variant,entry,lease),ct);
             var root=await view.Connect(lease.Share,ct);
             lease.Validate(api.ServerID,api.UserID!,variant,entry,DateTimeOffset.UtcNow,game.Id);
             using var launchDeadline=CancellationTokenSource.CreateLinkedTokenSource(ct);launchDeadline.CancelAfter(TimeSpan.FromSeconds(Math.Max(0.01,lease.ExpiresAt-DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()/1000.0-2)));
@@ -54,6 +65,7 @@ public sealed class GameRunner(ApiClient api,AccountStore store,IWindowsView vie
                 var beat=await api.Send<JsonElement>(HttpMethod.Post,$"/api/sessions/{lease.LeaseID}/heartbeat",new{},deadline.Token);
                 expires=beat.GetProperty("expiresAt").GetDouble();
                 if(beat.GetProperty("leaseID").GetString()!=lease.LeaseID||!double.IsFinite(expires)||expires<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+5)throw new InvalidDataException("Lease expired");
+                if(view is ILeaseBoundWindowsView renewing)await renewing.RenewLease(lease.LeaseID,expires,deadline.Token);
             }
             await wait;
         }catch(Exception e){failure=e;}

@@ -31,7 +31,7 @@ public sealed class WindowsView(IMappingBackend? mappingBackend=null):IReviewedW
         if(lease.WindowsLaunch?.EntryPath!=relative)throw new InvalidDataException("审查入口已变化");
         var plan=await RenpyAdapter.Prepare(root,lease,ct);ct.ThrowIfCancellationRequested();
         if(lease.ExpiresAt<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+2)throw new InvalidDataException("启动租约已过期");
-        var full=RenpyAdapter.CheckedPath(root,relative,false);return NativeJob.StartRenpy(full,Path.GetDirectoryName(full)!,plan);
+        var full=RenpyAdapter.CheckedPath(root,relative,false);return NativeJob.StartRenpy(full,Path.GetDirectoryName(full)!,plan,ct);
     }
     public Task<IGameProcess> Start(string root,string relative,CancellationToken ct)
     {
@@ -39,7 +39,7 @@ public sealed class WindowsView(IMappingBackend? mappingBackend=null):IReviewedW
         if(!full.StartsWith(Path.GetFullPath(root),StringComparison.OrdinalIgnoreCase))throw new ArgumentException("Unsafe entry");
         for(var path=full;path!=null&&path.Length>root.Length;path=Path.GetDirectoryName(path))if((File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new InvalidDataException("入口包含链接");
         if(!File.Exists(full))throw new FileNotFoundException("Windows 入口不可用");
-        ct.ThrowIfCancellationRequested();return Task.FromResult<IGameProcess>(NativeJob.Start(full,Path.GetDirectoryName(full)!));
+        ct.ThrowIfCancellationRequested();return Task.FromResult<IGameProcess>(NativeJob.Start(full,Path.GetDirectoryName(full)!,cancellation:ct));
     }
 }
 public enum SmbOperationStage { Initialize,Preflight,Create,Verify,Cleanup,Remove,Acknowledge,Timeout }

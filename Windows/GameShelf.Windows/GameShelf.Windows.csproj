@@ -10,4 +10,19 @@
   <ItemGroup><FrameworkReference Update="Microsoft.NETCore.App" RuntimeFrameworkVersion="10.0.14" /></ItemGroup>
   <ItemGroup><Content Include="Assets/**" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
   <ItemGroup><PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" /><ProjectReference Include="../GameShelf.Core/GameShelf.Core.csproj" /></ItemGroup>
-<ItemGroup><EmbeddedResource Include="MappedUserNative.cs" LogicalName="GameShelf.MappedUserNative.cs"/></ItemGroup></Project>
+<ItemGroup><EmbeddedResource Include="MappedUserNative.cs" LogicalName="GameShelf.MappedUserNative.cs"/></ItemGroup><ItemGroup><ProjectReference Include="../GameShelf.NetworkSession/GameShelf.NetworkSession.csproj"/><ProjectReference Include="../GameShelf.Broker/GameShelf.Broker.csproj" ReferenceOutputAssembly="false"/></ItemGroup>
+<PropertyGroup><BrokerPinFile>$(MSBuildThisFileDirectory)obj/broker-pins-$(Configuration)-$(Platform).txt</BrokerPinFile><BrokerOutput>$(MSBuildThisFileDirectory)../GameShelf.Broker/bin/$(Configuration)/net10.0-windows/win-x64/</BrokerOutput></PropertyGroup>
+<ItemGroup><EmbeddedResource Include="$(BrokerPinFile)" LogicalName="GameShelf.BrokerPins"/><BrokerPayload Include="$(BrokerOutput)GameShelf.Broker.exe;$(BrokerOutput)GameShelf.Broker.dll;$(BrokerOutput)GameShelf.Broker.deps.json;$(BrokerOutput)GameShelf.Broker.runtimeconfig.json;$(BrokerOutput)GameShelf.Core.dll;$(BrokerOutput)GameShelf.NetworkSession.dll"/></ItemGroup>
+<Target Name="PrepareBrokerPins" BeforeTargets="AssignTargetPaths" Condition="'$(NoBuild)' != 'true'">
+ <MSBuild Projects="$(MSBuildThisFileDirectory)../GameShelf.Broker/GameShelf.Broker.csproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=x64;UseSharedCompilation=false" RemoveProperties="TargetFramework;TargetFrameworks;RuntimeIdentifier;SelfContained" BuildInParallel="false"/>
+ <GetFileHash Files="@(BrokerPayload)" Algorithm="SHA256"><Output TaskParameter="Items" ItemName="BrokerHashed"/></GetFileHash>
+ <WriteLinesToFile File="$(BrokerPinFile)" Lines="@(BrokerHashed->'%(Filename)%(Extension)|%(FileHash)')" Overwrite="true"/>
+</Target>
+<Target Name="CopyBrokerPayload" AfterTargets="Build"><Copy SourceFiles="@(BrokerPayload)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true"/></Target>
+<Target Name="PublishBrokerPayload" AfterTargets="ComputeFilesToPublish">
+ <ItemGroup>
+  <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.RelativePath)' == 'GameShelf.Broker.exe' Or '%(ResolvedFileToPublish.RelativePath)' == 'GameShelf.Broker.dll' Or '%(ResolvedFileToPublish.RelativePath)' == 'GameShelf.Broker.deps.json' Or '%(ResolvedFileToPublish.RelativePath)' == 'GameShelf.Broker.runtimeconfig.json' Or '%(ResolvedFileToPublish.RelativePath)' == 'GameShelf.Core.dll' Or '%(ResolvedFileToPublish.RelativePath)' == 'GameShelf.NetworkSession.dll'"/>
+  <ResolvedFileToPublish Include="@(BrokerPayload)" RelativePath="%(Filename)%(Extension)" CopyToPublishDirectory="Always"/>
+ </ItemGroup>
+</Target>
+</Project>

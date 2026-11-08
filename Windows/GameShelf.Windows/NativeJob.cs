@@ -10,15 +10,15 @@ public sealed class NativeJob:IGameProcess
 {
     IntPtr job;
     NativeJob(IntPtr job)=>this.job=job;
-    public static NativeJob Start(string executable,string directory,string? arguments=null)=>StartCore(executable,directory,arguments,null);
-    public static NativeJob StartRenpy(string executable,string directory,RenpyLaunchPlan plan)
+    public static NativeJob Start(string executable,string directory,string? arguments=null,CancellationToken cancellation=default)=>StartCore(executable,directory,arguments,null,cancellation);
+    public static NativeJob StartRenpy(string executable,string directory,RenpyLaunchPlan plan,CancellationToken cancellation=default)
     {
         if(!Path.IsPathFullyQualified(plan.SaveRoot)||plan.SaveRoot.Contains('"')||plan.SaveRoot.Any(char.IsControl)||!plan.SaveRoot.Replace('\\','/').EndsWith("/"+RenpyAdapter.RelativePath,StringComparison.Ordinal))throw new ArgumentException("Invalid reviewed save path");
-        return StartCore(executable,directory,"--savedir \""+plan.SaveRoot+"\"",plan.Environment);
+        return StartCore(executable,directory,"--savedir \""+plan.SaveRoot+"\"",plan.Environment,cancellation);
     }
-    static NativeJob StartCore(string executable,string directory,string? arguments,IReadOnlyDictionary<string,string>? overrides)
+    static NativeJob StartCore(string executable,string directory,string? arguments,IReadOnlyDictionary<string,string>? overrides,CancellationToken cancellation)
     {
-        var job=CreateJobObject(IntPtr.Zero,null);if(job==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+        cancellation.ThrowIfCancellationRequested();var job=CreateJobObject(IntPtr.Zero,null);if(job==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
         var limits=new ExtendedLimits();limits.Basic.LimitFlags=0x2000;
         if(!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf<ExtendedLimits>())){CloseHandle(job);throw new Win32Exception(Marshal.GetLastWin32Error());}
         var startup=new StartupInfo{Size=(uint)Marshal.SizeOf<StartupInfo>()};
@@ -30,6 +30,7 @@ public sealed class NativeJob:IGameProcess
         }catch{CloseHandle(job);throw;}finally{if(environment!=IntPtr.Zero)Marshal.FreeHGlobal(environment);}
         try{
             if(!AssignProcessToJobObject(job,process.Process)){TerminateProcess(process.Process,1);throw new Win32Exception(Marshal.GetLastWin32Error());}
+            cancellation.ThrowIfCancellationRequested();
             if(ResumeThread(process.Thread)==uint.MaxValue){TerminateJobObject(job,1);throw new Win32Exception(Marshal.GetLastWin32Error());}
             return new(job);
         }catch{CloseHandle(job);throw;}finally{CloseHandle(process.Thread);CloseHandle(process.Process);}

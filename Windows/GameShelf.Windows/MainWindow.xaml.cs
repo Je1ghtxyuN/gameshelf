@@ -127,7 +127,7 @@ public sealed partial class MainWindow:Window
     async Task Launch(string id)
     {
         if(library==null||(local==null&&(api==null||store==null)))return;
-        try{gate.CanSwitch();var g=library.Games.Single(g=>g.Id==id);gameCancellation=new();StopButton.Visibility=Visibility.Visible;Status.Text=g.Title;running=local!=null?new StandaloneRunner(local,gate,new WindowsView().Start).Run(g.Id,gameCancellation.Token):new GameRunner(api!,store!,new WindowsView(),gate,deviceID).Run(g,gameCancellation.Token);await running;await Flush();await Refresh();Status.Text="";}
+        try{gate.CanSwitch();var g=library.Games.Single(g=>g.Id==id);gameCancellation=new();StopButton.Visibility=Visibility.Visible;Status.Text=g.Title;running=local!=null?new StandaloneRunner(local,gate,new WindowsView().Start).Run(g.Id,gameCancellation.Token):new GameRunner(api!,store!,ConnectedLauncher.Create(),gate,deviceID).Run(g,gameCancellation.Token);await running;await Flush();await Refresh();Status.Text="";}
         catch(OperationCanceledException){Status.Text="已停止";}catch(Exception e){Status.Text=e.Message;}
         finally{StopButton.Visibility=Visibility.Collapsed;gameCancellation?.Dispose();gameCancellation=null;running=null;}
     }
