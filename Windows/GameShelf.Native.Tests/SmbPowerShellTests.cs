@@ -9,11 +9,11 @@ static class SmbPowerShellTests
         var prefix=".EndsWith(('";var start=compiled.IndexOf(prefix,StringComparison.Ordinal)+prefix.Length;var end=compiled.IndexOf('\'',start);var suffix=compiled[start..end];
         Console.WriteLine("Compiled production Check suffix character count="+suffix.Length);
         if(suffix.Length!=1||suffix[0]!='\\')throw new Exception("Compiled suffix is not exactly one separator");
-        var checkPath=Path.GetTempFileName();await File.WriteAllTextAsync(checkPath,compiled);
+        var checkPath=Path.GetTempFileName();await File.WriteAllTextAsync(checkPath,compiled);var nativePath=Path.GetTempFileName();await File.WriteAllTextAsync(nativePath,ShellMappingBackend.NativeSource());
         var info=new ProcessStartInfo("powershell.exe"){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true};
         info.ArgumentList.Add("-NoProfile");info.ArgumentList.Add("-File");info.ArgumentList.Add(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,"../../../../Tools/test-smb-powershell.ps1")));
-        info.ArgumentList.Add("-CompiledCheckPath");info.ArgumentList.Add(checkPath);
-        using var process=Process.Start(info)!;var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();await process.WaitForExitAsync();Console.Write(await stdout);await stderr;File.Delete(checkPath);if(process.ExitCode!=0)throw new Exception("Actual generated PowerShell predicate/issuance fixtures failed");
+        info.ArgumentList.Add("-CompiledCheckPath");info.ArgumentList.Add(checkPath);info.ArgumentList.Add("-NativeSourcePath");info.ArgumentList.Add(nativePath);
+        using var process=Process.Start(info)!;var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();await process.WaitForExitAsync();Console.Write(await stdout);await stderr;File.Delete(checkPath);File.Delete(nativePath);if(process.ExitCode!=0)throw new Exception("Actual generated PowerShell predicate/issuance fixtures failed");
     }
     public static Task Allocation()
     {
