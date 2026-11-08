@@ -16,9 +16,9 @@ sealed class Transport:HttpMessageHandler
 sealed class FixtureView: IWindowsView
 {
     public bool Connected,Started,Disconnected,Stopped;
-    public bool FailStart,FailStop,FailDispose;
+    public bool FailStart,FailStop,FailDispose,FailDisconnect;
     public Task<string> Connect(SmbShare share,CancellationToken ct){Connected=true;return Task.FromResult("Z:\\");}
-    public Task Disconnect(){Disconnected=true;return Task.CompletedTask;}
+    public Task Disconnect(){if(FailDisconnect)throw new IOException("Fixture could not confirm disconnect");Disconnected=true;return Task.CompletedTask;}
     public Task<IGameProcess> Start(string root,string path,CancellationToken ct){Started=true;if(FailStart)throw new IOException("fixture start failed");return Task.FromResult<IGameProcess>(new Process(this));}
     sealed class Process(FixtureView owner):IGameProcess
     {

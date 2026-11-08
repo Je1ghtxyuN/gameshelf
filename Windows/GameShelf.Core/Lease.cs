@@ -65,9 +65,13 @@ public sealed class GameRunner(ApiClient api,AccountStore store,IWindowsView vie
             if(stopped)
             {
                 try{if(clock!=null){clock.Stop();var ended=DateTimeOffset.UtcNow;var seconds=clock.Elapsed.TotalSeconds;while(seconds>0){var part=Math.Min(86400,seconds);await store.Enqueue(game.Id,new(Guid.NewGuid(),deviceID,part,ended.ToUnixTimeSeconds()));seconds-=part;}}}catch(Exception e){failure??=e;}
-                try{await view.Disconnect();}catch(Exception e){failure??=e;}
-                try{if(lease!=null)await api.Delete($"/api/sessions/{Safety.Id(lease.LeaseID)}");}catch(Exception e){failure??=e;}
-                finally{gate.End();}
+                // A remaining or unverified account mapping must keep its lease and switch gate.
+                var disconnected=false;
+                try{await view.Disconnect();disconnected=true;}catch(Exception e){failure??=e;}
+                if(disconnected){
+                    try{if(lease!=null)await api.Delete($"/api/sessions/{Safety.Id(lease.LeaseID)}");}catch(Exception e){failure??=e;}
+                    finally{gate.End();}
+                }
             }
         }
         if(failure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
