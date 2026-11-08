@@ -136,7 +136,8 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
  }
  var root:URL {
   if let i=CommandLine.arguments.firstIndex(of:"--data-dir"),CommandLine.arguments.indices.contains(i+1){return URL(fileURLWithPath:CommandLine.arguments[i+1])}
-  return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/GameShelf")
+  let folder=(Bundle.main.object(forInfoDictionaryKey:"GameShelfPreviewBuild") as? Bool)==true ? "GameShelf Preview":"GameShelf"
+  return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support").appendingPathComponent(folder)
  }
  func applicationDidFinishLaunching(_ notification:Notification){
   if let icon=Bundle.main.url(forResource:"AppIcon",withExtension:"icns").flatMap({NSImage(contentsOf:$0)}){NSApp.applicationIconImage=icon}
