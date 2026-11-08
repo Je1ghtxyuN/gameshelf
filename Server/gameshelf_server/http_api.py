@@ -62,6 +62,10 @@ class Application:
         selected = re.fullmatch('/api/admin/roots/'+ID+'/candidates',path)
         if method=='POST' and selected:
             return s.register_selected(selected[1],data,authorize=lambda:self.require_admin(token))
+        history = re.fullmatch('/api/account/owner-migrations/'+ID+'/history', path)
+        if method == 'GET' and history:
+            from .owner_migration import OwnerMigrationCoordinator
+            return OwnerMigrationCoordinator.read_account_history(s, token, history[1])
         # Keep authorization and mutation within the SAME service authority lock.
         # A disabled admin cannot race a queued request after authentication.
         with s.lock:

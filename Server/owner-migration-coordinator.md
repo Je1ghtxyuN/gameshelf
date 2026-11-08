@@ -1,8 +1,8 @@
 # Internal single-game owner migration v1
 
-Scope: trusted local Python caller only, no HTTP, CLI accepting remote paths,
-UI, automatic publishing/linking, production invocation, or conversion of all
-legacy records. Existing source paths and local UUIDs are never renamed. The
+The migration write operations are for a trusted local Python caller. An
+authenticated HTTP route provides confirmation of existing committed history.
+Existing source paths and local UUIDs are never renamed. The
 caller must stop/freeze every old writer and keep the selected source and private
 target quiescent until commit; a server barrier cannot stop external OS writers.
 
@@ -56,7 +56,7 @@ API:
 exact result is `{payload,receiptSHA256,envelopeSHA256}`. The envelope digest is
 SHA256 of the exact private envelope bytes checked, not JSON reserialized by a
 client. Swift must compare this authoritative result with its expected original
-selection before committing aliases; a public transport bridge is not included.
+selection before committing aliases. The live transition verifier runs locally.
 `mappingSHA256` hashes canonical `{source:<reviewed legacy directory>,target:"."}`.
 Runtime/config pins are bound separately by evidenceSHA256/rulesSHA256 and
 sourceSignature; mappingSHA256 alone does not certify runtime compatibility.
@@ -80,6 +80,12 @@ legacy_saves.apply_import. Only use it to load an alias already recorded in a
 private accepted-alias baseline; match that alias and all receipt bindings. It
 cannot mint a permit for a new alias. Prepared, partial, tampered and foreign-owner
 history is denied. The server does not receive/interpret the client's raw aliases.
+
+The original bound administrator can retrieve the same historical confirmation
+with an authenticated `GET /api/account/owner-migrations/{operationID}/history`.
+The response has exactly `payload`, `receiptSHA256`, and `envelopeSHA256`.
+The route reads existing committed state only. It requires a current token and
+does not provide initial transition authority, commit, or import.
 
 There is no distributed activation handoff. `commit` releases the server barrier
 before the client writes aliases. The operator MUST keep all old/new devices and

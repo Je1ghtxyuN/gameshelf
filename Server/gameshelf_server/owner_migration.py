@@ -533,6 +533,33 @@ class OwnerMigrationCoordinator:
                 receipt = self._verified(operation, committed=True, live=False)
                 return self._confirmation(operation, receipt)
 
+    @classmethod
+    def read_account_history(cls, service, token, operation):
+        """Authenticate and read a committed receipt without initializing migration state."""
+        with service.lock:
+            caller = service.authenticate(token)
+            if not caller['admin']:
+                raise APIError(403, 'Original administrator required')
+            if not service.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_migration_operations'"
+            ).fetchone():
+                raise APIError(404, 'Owner migration operation not found')
+            # A committed operation is immutable. Do not acquire its file lock
+            # under service.lock, or run the coordinator's write-side initializer.
+            reader = cls.__new__(cls)
+            reader.s = service
+            _, owner = reader._owner()
+            if caller['id'] != owner['id']:
+                raise APIError(403, 'Original administrator required')
+            reader.base = service.state/'owner-migrations'
+            reader.key = _private(service.state/'owner-migration-signing.key', 32, binary=True)
+            if len(reader.key) != 32:
+                _fail('Invalid private owner migration signing key')
+            receipt = reader._verified(operation, committed=True, live=False)
+            if receipt['payload']['accountID'] != caller['id']:
+                raise APIError(403, 'Original administrator required')
+            return reader._confirmation(operation, receipt)
+
     def _confirmation(self, operation, receipt):
         raw = _private(self.base/operation/'receipt.json', binary=True)
         if raw != _encoded(receipt):

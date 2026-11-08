@@ -15,11 +15,13 @@ from gameshelf_server.common import APIError
 
 
 class OwnerMigrationTests(unittest.TestCase):
+    denied = test_service.ServiceTests.denied
     def setUp(self):
         self.assertIsNotNone(importlib.util.find_spec('gameshelf_server.owner_migration'),
                              'trusted owner coordinator must exist')
         from gameshelf_server.owner_migration import OwnerMigrationCoordinator
         self.Coordinator = OwnerMigrationCoordinator
+        self.APIError = APIError
         test_service.ServiceTests.setUp(self)
         _, win, _ = setup_sources(self)
         old = self.s
@@ -52,6 +54,50 @@ class OwnerMigrationTests(unittest.TestCase):
         binding.chmod(0o600)
         self.write_manifest()
         self.c = self.Coordinator(self.s)
+
+    def history(self, token, operation=None, method='GET'):
+        from gameshelf_server.http_api import Application
+        return Application(self.s).dispatch(method,
+            '/api/account/owner-migrations/' + (operation or self.manifest['operationID']) + '/history',
+            {}, token)
+
+    def test_http_history_is_owner_only_and_immutable(self):
+        from gameshelf_server import legacy_saves
+        op = self.manifest['operationID']
+        owner = self.s.login('owner', 'correct horse battery staple')['token']
+        guest = self.s.login('alice', 'alice password long')['token']
+        self.s.create_user('other-admin', 'another admin password', admin=True)
+        other_admin = self.s.login('other-admin', 'another admin password')['token']
+        self.denied(lambda: self.history(owner, 'f'*32), 404)
+        self.reserve(); self.c.apply(op)
+        self.denied(lambda: self.history(owner), 409)
+        self.c.commit(op)
+        expected = self.c.verify_history_transition(op)
+        self.c.namespace_data(op).joinpath('slot.save').write_bytes(b'legitimate later progress')
+        with patch.object(legacy_saves, 'apply_import', side_effect=AssertionError('no import')), \
+             patch.object(self.Coordinator, '_operation', side_effect=AssertionError('no operation lock')):
+            self.assertEqual(self.history(owner), expected)
+        for token, code in [(None, 401), (guest, 403), (other_admin, 403)]:
+            self.denied(lambda: self.history(token), code)
+        self.denied(lambda: self.history(owner, method='POST'), 404)
+        receipt = self.s.state/'owner-migrations'/op/'receipt.json'
+        receipt.write_bytes(receipt.read_bytes() + b' ')
+        self.denied(lambda: self.history(owner), 409)
+        self.s.logout(owner)
+        self.denied(lambda: self.history(owner), 401)
+        owner = self.s.login('owner', 'correct horse battery staple')['token']
+        self.s.db.execute('UPDATE users SET disabled=1 WHERE id=?', (self.admin['id'],))
+        self.denied(lambda: self.history(owner), 401)
+
+    def test_http_history_never_initializes_storage(self):
+        owner = self.s.login('owner', 'correct horse battery staple')['token']
+        self.s.db.execute('DROP TABLE owner_migration_operations')
+        (self.s.state/'owner-migration-signing.key').unlink()
+        (self.s.state/'owner-migrations').rmdir()
+        self.denied(lambda: self.history(owner), 404)
+        self.assertFalse((self.s.state/'owner-migration-signing.key').exists())
+        self.assertFalse((self.s.state/'owner-migrations').exists())
+        self.assertIsNone(self.s.db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_migration_operations'").fetchone())
 
     def write_manifest(self):
         self.path.write_text(json.dumps(self.manifest))
