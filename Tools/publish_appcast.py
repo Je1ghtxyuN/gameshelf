@@ -16,7 +16,7 @@ import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
 
-REPOSITORY = "Je1ghtxyuN/gameshelf-for-mac"
+REPOSITORY = "Je1ghtxyuN/gameshelf"
 FEED_URL = f"https://github.com/{REPOSITORY}/releases/latest/download/appcast.xml"
 SPARKLE_VERSION = "2.10.1"
 SPARKLE_SHA256 = "1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27"

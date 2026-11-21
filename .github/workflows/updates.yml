@@ -16,7 +16,7 @@ concurrency:
 jobs:
   publish:
     if: >-
-      github.repository == 'Je1ghtxyuN/gameshelf-for-mac' &&
+      github.repository_id == '1444734687' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event.release.draft == false && github.event.release.prerelease == false))
     runs-on: macos-15

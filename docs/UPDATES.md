@@ -7,8 +7,10 @@ libraries, NAS shares, saves, or other user data.
 
 The public configuration is `Resources/Updates.json`:
 
-- `feedURL`: `https://github.com/Je1ghtxyuN/gameshelf-for-mac/releases/latest/download/appcast.xml`
+- `feedURL`: `https://github.com/Je1ghtxyuN/gameshelf/releases/latest/download/appcast.xml`
 - `publicKey`: the base64 Ed25519 public key used by the shipped app.
+
+Existing v1.3.2 and earlier installations still use the former repository URL. GitHub redirects that URL to the renamed repository. Keep the former repository name reserved so these clients continue to receive updates. New builds use the current URL.
 
 The bundle must contain the same configuration and set `SUFeedURL`,
 `SUPublicEDKey`, `SURequireSignedFeed=true`, and
@@ -18,7 +20,7 @@ The bundle must contain the same configuration and set `SUFeedURL`,
 ## One release workflow
 
 1. Build and verify the release app using the normal build/package process.
-2. Create a draft release in `Je1ghtxyuN/gameshelf-for-mac` with a numeric
+2. Create a draft release in `Je1ghtxyuN/gameshelf` with a numeric
    version tag such as `v1.2.5`. Attach exactly one completed DMG named
    `GameShelf-v1.2.5-macOS-arm64.dmg`. Finish uploading all assets before publishing.
 3. Publish as a stable release and make it GitHub's latest release.
