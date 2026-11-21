@@ -83,7 +83,7 @@ from .save_namespaces import SaveNamespaces
 from .migration_barriers import MigrationBarriers
 
 class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,AccountFeatures,SharedWorkflow):
-    def __init__(self, state, driver, allowed_sources, clock=time.time, token_ttl=86400, lease_ttl=90):
+    def __init__(self, state, driver, allowed_sources, clock=time.time, token_ttl=86400, lease_ttl=90, *, direct_nas=False):
         self.state = clean_path(state)
         self.allowed = [clean_path(p) for p in allowed_sources]
         from .driver import mount_table, physical_overlap
@@ -92,6 +92,7 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
             raise APIError(400, 'Sources and writable state must be disjoint')
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.driver, self.clock = driver, clock
+        self.direct_nas = direct_nas
         self.token_ttl, self.lease_ttl = token_ttl, lease_ttl
         self.lock = threading.RLock()
         self.scan_lock = threading.Lock()
@@ -168,8 +169,10 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
         if 'error' in result:
             raise result['error']
         return result.get('value')
-    def _open_driver(self,lease,lower,user,rules,launch_profile=None,save_namespace=None):
+    def _open_driver(self,lease,lower,user,rules,launch_profile=None,save_namespace=None,windows_entry=None):
         with self.driver_lock:
+            if windows_entry:
+                lease['windows_entry'] = windows_entry
             if launch_profile:
                 from .reviewed_profiles import verify_source
                 if not callable(getattr(self.driver,'verify_launch_profile',None)):
@@ -186,6 +189,8 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
                 share=self.driver.open(lease,lower,user,save_paths=rules)
             if launch_profile:
                 self.driver.verify_launch_profile(lease,launch_profile)
+            if windows_entry:
+                self.driver.prepare_generic_windows_entry(lease,windows_entry)
             return share
     def close(self):
         self.db.close()
@@ -456,9 +461,9 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
         return [dict(userID=r[0], gameID=r[1]) for r in self.db.execute('SELECT * FROM grants')]
     @locked
     def catalog(self, user):
-        return dict(games=[self._game(r) for r in self.db.execute('SELECT games.* FROM games JOIN grants ON games.id=game_id WHERE user_id=?', (user['id'],))])
+        return dict(games=[self._game(r) for r in self.db.execute('SELECT games.* FROM games JOIN library_access ON games.id=game_id WHERE user_id=?', (user['id'],))])
     def _permitted(self, user, game_id):
-        if not self.db.execute('SELECT 1 FROM grants JOIN users ON users.id=user_id WHERE user_id=? AND game_id=? AND disabled=0', (user['id'], game_id)).fetchone():
+        if not self.db.execute('SELECT 1 FROM library_access WHERE user_id=? AND game_id=?', (user['id'], game_id)).fetchone():
             raise APIError(403, 'Game not granted')
     def _revoke(self,row):
         current=self.db.execute('SELECT status FROM leases WHERE id=?',(row['id'],)).fetchone()
@@ -481,11 +486,19 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
         except Exception:
             raise APIError(503,'Share shutdown pending; retry later') from None
     @locked
-    def session(self, user, game_id, device, *, token=None, adapter=None):
+    def session(self, user, game_id, device, *, token=None, adapter=None, windows_entry=None, mounted_workspace=False):
         text(device, 128)
         if token is not None and self.authenticate(token)['id'] != user['id']:
             raise APIError(401,'Token/account mismatch')
         self._permitted(user, game_id)
+        exports = getattr(self.driver, 'workspace_exports', None)
+        if exports is not None and not mounted_workspace:
+            raise APIError(409, 'This library requires a client using a configured system SMB account')
+        if mounted_workspace and (not self.direct_nas or exports is None or user['id'] not in exports.shares):
+            raise APIError(409, 'No verified NAS workspace export for this account')
+        family_windows_workspace = windows_entry is not None and self._family_windows_workspace()
+        if windows_entry is not None and not family_windows_workspace:
+            self._require_library_admin(user)
         canonical = self._canonical(game_id)
         self._assert_no_migration(user['id'],canonical)
         old = self.db.execute("SELECT * FROM leases WHERE user_id=? AND canonical_id=? AND status!='closed'", (user['id'], canonical)).fetchone()
@@ -496,16 +509,32 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
                 raise APIError(409, 'Game already has a write lease; release it first')
             self._revoke(old)
         game = self.db.execute('SELECT * FROM games WHERE id=?', (game_id,)).fetchone()
+        if windows_entry is not None:
+            if not family_windows_workspace:
+                self._require_library_admin(user)
+            if not callable(getattr(self.driver,'prepare_generic_windows_entry',None)):
+                raise APIError(409,'Driver cannot prepare an owner Windows overlay')
         launch_profile=self._launch_profile_for_game(game)
         save_namespace=self._namespace_for_game(user,game,canonical)
         if save_namespace and adapter!=save_namespace['adapter']:
             raise APIError(409,'Client must explicitly support renpy-savedir-v1 arguments, fixed environment and reviewed runtime mitigation')
-        lower = self._external(lambda:self._lower(game))
+        def validate_source():
+            lower = self._lower(game)
+            if windows_entry is not None:
+                self._validate_entry_choice(game,lower,windows_entry,'windows')
+            return lower
+        lower = self._external(validate_source)
         if token is not None:
             self.authenticate(token)
         self._permitted(user,game_id)
         if self._launch_profile_for_game(game)!=launch_profile:
             raise APIError(409,'Reviewed launch profile changed during source validation')
+        if windows_entry is not None:
+            if not family_windows_workspace:
+                self._require_library_admin(user)
+            current_game=self.db.execute('SELECT * FROM games WHERE id=?',(game_id,)).fetchone()
+            if not current_game or dict(current_game)!=dict(game):
+                raise APIError(409,'Edition changed during Windows entry validation')
         # Linking may have changed while filesystem validation released the lock.
         canonical = self._canonical(game_id)
         self._assert_no_migration(user['id'],canonical)
@@ -518,8 +547,12 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
                      expires=float(self.clock()+self.lease_ttl), status='opening', canonical_id=canonical,save_namespace=json.dumps({k:save_namespace[k] for k in ('key','relativePath','adapter','serverID','userID','canonicalID','compatibilityKey')},sort_keys=True) if save_namespace else '',
                      token_digest=hashlib.sha256(token.encode()).hexdigest() if token else '')
         self.db.execute('INSERT INTO leases(id,user_id,game_id,device,expires,status,token_digest,canonical_id,save_namespace) VALUES (:id,:user_id,:game_id,:device,:expires,:status,:token_digest,:canonical_id,:save_namespace)', lease)
+        lease['mounted_workspace'] = mounted_workspace
         try:
-            share = self._external(lambda:self._open_driver(lease,lower,user,json.loads(game['save_paths']),launch_profile,save_namespace))
+            share = self._external(lambda:self._open_driver(lease,lower,user,json.loads(game['save_paths']),launch_profile,save_namespace,
+                windows_entry if not (launch_profile or save_namespace) else None))
+            mz_sync = getattr(self.driver, 'mz_sync', None)
+            mz_windows_launch = mz_sync.windows_launch(lease) if mz_sync is not None else None
         except APIError:
             self._revoke(lease)
             raise
@@ -530,6 +563,8 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
             if token is not None:
                 self.authenticate(token)
             self._permitted(user,game_id)
+            if windows_entry is not None and not family_windows_workspace:
+                self._require_library_admin(user)
             status=self.db.execute('SELECT status FROM leases WHERE id=?',(lease['id'],)).fetchone()[0]
             if status!='opening':
                 raise APIError(409,'Lease was revoked during provisioning')
@@ -539,14 +574,25 @@ class Service(MigrationBarriers,SaveNamespaces,LaunchProfiles,UnifiedLibrary,Acc
         lease['expires'] = float(self.clock()+self.lease_ttl)
         self.db.execute("UPDATE leases SET status='active', expires=? WHERE id=?", (lease['expires'], lease['id']))
         result=dict(leaseID=lease['id'], expiresAt=lease['expires'], serverID=self.server_id,
-                    userID=user['id'], game=self._game(game), profileKey=f'{self.server_id}/{user["id"]}/{game_id}', share=share)
+                    userID=user['id'], game=self._game(game), profileKey=f'{self.server_id}/{user["id"]}/{game_id}')
+        if mounted_workspace:
+            result['mountedWorkspace'] = lease['mounted_workspace_descriptor']
+        else:
+            result['share'] = share
+        if 'workspace_receipt' in lease:
+            result['workspaceReceipt'] = lease['workspace_receipt']
         if launch_profile:
             from .reviewed_profiles import launch_evidence
             result['windowsLaunch']=launch_evidence(launch_profile)
+        if mz_windows_launch:
+            result['windowsLaunch']=mz_windows_launch
         if save_namespace:
             result['saveNamespace']=self._namespace_public(save_namespace)
             result['renpyLaunch']=self._namespace_renpy_proof(save_namespace,game)
             if save_namespace['variant']['platform']=='windows': result['windowsLaunch']=self._namespace_windows_proof(save_namespace,game)
+        if windows_entry is not None and 'windowsLaunch' not in result:
+            result['windowsLaunch']=dict(entryPath=windows_entry,isolation='account-private-overlay' if family_windows_workspace else 'owner-private-overlay',
+                                         saveProfileVerified=False)
         return result
     def _lease(self, user, lease_id):
         row = self.db.execute("SELECT * FROM leases WHERE id=? AND user_id=? AND status!='closed'", (lease_id, user['id'])).fetchone()

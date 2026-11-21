@@ -1,8 +1,8 @@
 param([string]$Script='smoke.ps1',[string]$Log='interactive-smoke.log')
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
-$dev=Join-Path $env:USERPROFILE 'GameShelfDev'
-$arguments='-NoProfile -ExecutionPolicy Bypass -Command "& { & '+[char]39+(Join-Path $dev $Script)+[char]39+' *> '+[char]39+(Join-Path $dev $Log)+[char]39+' }"'
+. (Join-Path $PSScriptRoot 'build-environment.ps1')
+$arguments='-NoProfile -ExecutionPolicy Bypass -Command "& { & '+[char]39+(Join-Path $PSScriptRoot $Script)+[char]39+' *> '+[char]39+(Join-Path $dev $Log)+[char]39+' }"'
 $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
 $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 try {

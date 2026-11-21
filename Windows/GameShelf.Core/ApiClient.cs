@@ -26,6 +26,9 @@ public sealed class ApiClient:IDisposable
         if(!route.StartsWith("/api/",StringComparison.Ordinal)||route.Contains("..")||route.Contains('?')||route.Contains('#'))throw new ArgumentException("Invalid API route");
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(ct);deadline.CancelAfter(http.Timeout);ct=deadline.Token;
         using var request=new HttpRequestMessage(method,route);
+        if(method==HttpMethod.Post && route.StartsWith("/api/library/games/",StringComparison.Ordinal) &&
+           route.EndsWith("/session",StringComparison.Ordinal))
+            request.Headers.Add("X-GameShelf-Client-Platform","windows");
         if(token!=null)request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",token);
         if(body!=null){var bytes=JsonSerializer.SerializeToUtf8Bytes(body,AccountStore.Json);if(bytes.Length>16384)throw new ArgumentException("Request too large");request.Content=new ByteArrayContent(bytes);request.Content.Headers.ContentType=new MediaTypeHeaderValue("application/json");}
         using var response=await http.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,ct);

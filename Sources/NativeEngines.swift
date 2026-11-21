@@ -22,7 +22,23 @@ enum NativeEngines {
   try FileManager.default.createDirectory(at:saves,withIntermediateDirectories:true)
   try FileManager.default.createDirectory(at:logs,withIntermediateDirectories:true)
   var environment=ProcessInfo.processInfo.environment
-  environment["RENPY_PATH_TO_SAVES"]=saves.path
+  // Existing shared Wine saves remain the same account data when an exact
+  // native engine becomes available; do not silently start an empty local set.
+  let wineSaves=folder.appendingPathComponent(".gameshelf-profile/WindowsUsers/Player/AppData/Roaming/RenPy")
+  let fm=FileManager.default
+  if game.shared != nil,(fm.fileExists(atPath:wineSaves.path) || (try? fm.destinationOfSymbolicLink(atPath:wineSaves.path)) != nil) {
+   var checked=folder
+   for part in [".gameshelf-profile","WindowsUsers","Player","AppData","Roaming","RenPy"] {
+    checked.appendPathComponent(part)
+    guard try fm.attributesOfItem(atPath:checked.path)[.type] as? FileAttributeType == .typeDirectory,
+          checked.resolvingSymlinksInPath().path.hasPrefix(folder.resolvingSymlinksInPath().path+"/") else {
+     throw LibraryError("账号存档路径包含外部链接或异常目录，未切换原生引擎。")
+    }
+   }
+   environment["RENPY_PATH_TO_SAVES"]=wineSaves.path
+  } else {
+   environment["RENPY_PATH_TO_SAVES"]=saves.path
+  }
   environment["RENPY_LOG_BASE"]=logs.path
   for language in ["schinese","simplified_chinese","chinese"] {
    if FileManager.default.fileExists(atPath:folder.appendingPathComponent("game/tl/"+language).path) {environment["RENPY_LANGUAGE"]=language;break}

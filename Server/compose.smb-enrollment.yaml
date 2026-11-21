@@ -1,0 +1,12 @@
+services:
+  gateway:
+    environment:
+      GAMESHELF_SMB_ENROLLMENT_SOCKET: /nas-enrollment/enrollment.sock
+      GAMESHELF_SMB_VERIFICATION_SHARE: ${GAMESHELF_SMB_VERIFICATION_SHARE:?Set the NAS verification share name}
+    volumes:
+      - type: bind
+        source: ${GAMESHELF_SMB_ENROLLMENT_SOCKET_DIR:?Set the private NAS host socket directory}
+        target: /nas-enrollment
+        read_only: true
+        bind:
+          create_host_path: false

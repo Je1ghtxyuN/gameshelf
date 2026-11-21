@@ -7,6 +7,12 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained><SelfContained>true</SelfContained>
     <EnableMsixTooling>false</EnableMsixTooling><PublishReadyToRun>false</PublishReadyToRun>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(PersonalNasPreview)' == 'true'">
+    <DefineConstants>$(DefineConstants);PERSONAL_NAS_PREVIEW</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'UIAcceptance'">
+    <DefineConstants>$(DefineConstants);UI_ACCEPTANCE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup><FrameworkReference Update="Microsoft.NETCore.App" RuntimeFrameworkVersion="10.0.14" /></ItemGroup>
   <ItemGroup><Content Include="Assets/**" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
   <ItemGroup><PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" /><ProjectReference Include="../GameShelf.Core/GameShelf.Core.csproj" /></ItemGroup>

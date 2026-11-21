@@ -1,8 +1,9 @@
 ﻿$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
-$dev=Join-Path $env:USERPROFILE 'GameShelfDev'
+. (Join-Path $PSScriptRoot 'build-environment.ps1')
 $src=Join-Path $dev 'src/Windows'
-$app=Join-Path $src 'GameShelf.Windows/bin/x64/Release/net10.0-windows10.0.19041.0/win-x64/GameShelf.Windows.exe'
+$app=Join-Path $src 'GameShelf.Windows/bin/x64/UIAcceptance/net10.0-windows10.0.19041.0/win-x64/GameShelf.Windows.exe'
+if(-not (Test-Path -LiteralPath $app -PathType Leaf)){throw 'Build GameShelf.Windows with -c UIAcceptance before running this fixture.'}
 $dotnet=Join-Path $dev 'dotnet/dotnet.exe'
 $fixture=Join-Path $src 'GameShelf.UiFixture/bin/Release/net10.0/GameShelf.UiFixture.dll'
 $server=Start-Process $dotnet -ArgumentList ('"'+$fixture+'"') -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $dev 'fixture-port.txt')
@@ -11,6 +12,11 @@ try {
  Start-Sleep -Seconds 2
  $port=[int](Get-Content (Join-Path $dev 'fixture-port.txt') -First 1)
  Remove-Item (Join-Path $dev 'ui-fixture-data/connection.json') -ErrorAction SilentlyContinue
+ $account=Join-Path (Join-Path $dev 'ui-fixture-data') (('1'*32)+'-'+('2'*32))
+ New-Item -ItemType Directory -Force $account|Out-Null
+ $pending=@{serverID=('1'*32);userID=('2'*32);gameID=('3'*32);event=@{eventID=[guid]::NewGuid();deviceID='ui-fixture';elapsedSeconds=60;endedAt=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()}}
+ ConvertTo-Json -InputObject @($pending) -Depth 4 -Compress | Set-Content -LiteralPath (Join-Path $account 'outbox.json') -Encoding ASCII
+
  $p=Start-Process $app -ArgumentList ('"--data-dir='+(Join-Path $dev 'ui-fixture-data')+'"') -PassThru
  Start-Sleep -Seconds 6
  $p.Refresh()
@@ -49,6 +55,11 @@ public static class Capture {
  (Find-ID 'LoginButton').GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
  Start-Sleep -Seconds 4
  if($null -eq (Find-Name 'Windows Fixture')){throw 'First account library missing'}
+ $cache=Get-Content -LiteralPath (Join-Path $account 'library.json') -Raw | ConvertFrom-Json
+ if($cache.games[0].playtimeSeconds -ne 180){throw 'Login did not reload the library after uploading pending playtime'}
+ if((Get-Content -LiteralPath (Join-Path $account 'outbox.json') -Raw).Trim() -ne '[]'){throw 'Uploaded playtime still in outbox'}
+ Write-Output 'PASS pending playtime uploaded and reflected during login'
+
  $node=Find-Name '未分类'
  for($i=0;$i -lt 4 -and $null -ne $node;$i++){$pattern=$null;if($node.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)){$pattern.Expand();break};$node=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)}
  Start-Sleep -Milliseconds 400

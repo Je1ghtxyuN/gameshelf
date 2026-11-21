@@ -115,6 +115,13 @@ separate prerelease channels. No changes are made to updater implementation.
 Signature checking here does not replace Developer ID signing/notarization or
 manual installation/update acceptance tests.
 
+For NAS launch acceptance, replace the installed app, open the new build, and
+launch a game from its library card. macOS can prompt again for Network Volumes
+access after an ad-hoc signed update. If the workspace receipt cannot be opened
+and the system log shows a pending Network Volumes prompt for GameShelf, resolve
+that prompt before retrying the same game. Use the isolated gateway and a save
+copy to verify loading, saving to an empty slot, and reopening that slot.
+
 GitHub moves `/releases/latest` when a release becomes latest, before this
 workflow finishes. During publishing or after a failed run, the feed URL may
 return 404 until a successful upload; clients must retain their installed app.

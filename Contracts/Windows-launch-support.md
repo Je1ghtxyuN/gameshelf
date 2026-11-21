@@ -2,9 +2,15 @@
 
 The client consumes v2 `POST /api/library/games/{canonicalID}/session` with `{variantID,deviceID,adapter:"renpy-savedir-v1"}`. Adapter is an explicit supported capability, not an arbitrary command. The v1 lease response remains the base, including `game.id`, account/server identity and expiry, `share.host`, exact `share.port`, `share.name`/`share.share`, and ephemeral share credentials. Credentials stay in memory; time `endedAt` remains finite Unix seconds.
 
+## Administrator overlay launch
+
+A supporting gateway advertises `ownerWindowsOverlay: true` in the administrator's library response. The client adds `windowsEntry` to the session request with the exact published relative executable. The server validates the administrator, edition and entry before provisioning an account overlay. Reviewed launch proofs still take precedence.
+
+A generic launch returns `windowsLaunch` with `entryPath`, `isolation: "owner-private-overlay"` and `saveProfileVerified: false`. The Windows broker validates the lease, entry path and PE header before native execution. Relative writes go to the account workspace. Known seed-save paths are masked. The generic mode does not cover AppData, registry writes or unknown seed-save paths, and is unavailable to ordinary shared accounts.
+
 ## Reviewed proof and namespace
 
-The server now issues `windowsLaunch` only for its reviewed registry profiles. The existing proof binds `entryPath`, `isolation:"reviewed-relative-saves"`, `saveProfileVerified`, `reviewedProfileID`, `profileRevision`, `entrySHA256`, `rulesSHA256`, `evidenceSHA256`, `sourceSignature`, `savePaths`, and `synthetic`. Unknown/unreviewed games do not gain proof from detected save paths or an administrator's assertion.
+A reviewed `windowsLaunch` proof binds `entryPath`, `isolation:"reviewed-relative-saves"`, `saveProfileVerified`, `reviewedProfileID`, `profileRevision`, `entrySHA256`, `rulesSHA256`, `evidenceSHA256`, `sourceSignature`, `savePaths`, and `synthetic`. Unknown/unreviewed games do not gain proof from detected save paths or an administrator's assertion.
 
 Reviewed Ren'Py canonical sessions additionally return exactly six public `saveNamespace` fields:
 
@@ -31,6 +37,6 @@ These three overrides are built locally into the child process environment. No s
 
 Windows 11 24H2 `New-SmbMapping -TcpPort` capability is checked. The exact API port is used, with no fallback to 445 and no NAS administrator share. Mapping ownership starts only after a correlated successful operation receipt; cleanup verifies its provenance, current port and network credential identity. Failed creation cannot remove another caller's mapping.
 
-Real Windows build, process lifetime, fixture account views, fixed adapter args/environment and local-time tests are separate from actual NAS verification. No real NAS/game, 1445/445 coexistence, real Ren'Py export compatibility, migration/adoption or cross-device save merge is certified by those fixtures. Missing/unsupported review proof fails closed and releases an unused lease. An isolated synthetic live TLS/SMB2445 attempt reached session issuance but failed in client mapping creation before native launch; it did not pass acceptance. Normal cleanup was separately confirmed. No live NAS acceptance or production install/release is claimed.
+Real Windows build, process lifetime, fixture account views, fixed adapter args/environment and local-time tests are separate from actual NAS verification. No real NAS/game, 1445/445 coexistence, real Ren'Py export compatibility, migration/adoption or cross-device save merge is certified by those fixtures. An ordinary shared account with missing or unsupported review proof fails closed and releases an unused lease. An isolated synthetic live TLS/SMB2445 attempt reached session issuance but failed in client mapping creation before native launch; it did not pass acceptance. Normal cleanup was separately confirmed. No live NAS acceptance or production install/release is claimed.
 
 Official SMB capability references: https://learn.microsoft.com/en-us/windows-server/storage/file-server/smb-ports ; https://learn.microsoft.com/en-us/powershell/module/smbshare/new-smbmapping

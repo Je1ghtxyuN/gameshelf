@@ -275,6 +275,17 @@ import CryptoKit
   try check(mountedCache.cached && fm.fileExists(atPath:mountedCache.app.appendingPathComponent("Contents/MacOS/engine").path),"shared native .app root must work when SMB mount has no .app suffix")
   var untrustedDirectory=mounted;untrustedDirectory.shared=nil
   try rejects("unshared arbitrary non-package directory") { _ = try NativeAppCache.prepare(game:untrustedDirectory,root:root) }
+  let accountMount = root.appendingPathComponent("NetworkMounts/" + mounted.shared!.storageKey)
+  try fm.createDirectory(at: accountMount.deletingLastPathComponent(), withIntermediateDirectories: true)
+  try fm.moveItem(at: mountedRoot, to: accountMount)
+  mounted.id = UUID()
+  mounted.folder = accountMount.path
+  mounted.originalFolder = accountMount.path
+  let accountCache = try NativeAppCache.prepare(game: mounted, root: root)
+  try check(accountCache.cached, "an account mount beside NativeApps must launch")
+  var otherAccount = mounted
+  otherAccount.shared?.accountID = "other-account"
+  try rejects("another account's mount") { _ = try NativeAppCache.prepare(game: otherAccount, root: root) }
   let original = try Data(contentsOf: info)
   let launch = try NativeAppCache.prepare(game: game, root: root)
   try check(launch.cached, "recognized RenPy must cache")

@@ -8,6 +8,7 @@ import ssl
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import sys
@@ -34,6 +35,13 @@ class Settings:
     bootstrap_file: str | None
     public_address: str | None = None
     certificate_sha256: str | None = None
+    windows_smb_host: str | None = None
+    direct_nas: bool = False
+    workspace_export_root: Path | None = None
+    workspace_manifest: Path | None = None
+    smb_enrollment_socket: Path | None = None
+    smb_verification_share: str | None = None
+
     @classmethod
     def from_env(cls, env):
         def number(name, default, low, high):
@@ -53,9 +61,32 @@ class Settings:
             cert, key = env.get('GAMESHELF_TLS_CERT') or None, env.get('GAMESHELF_TLS_KEY') or None
             if bool(cert) != bool(key) or (not loopback and not cert):
                 raise ValueError('TLS certificate and key are required off loopback')
+            direct_nas = env.get('GAMESHELF_DIRECT_NAS','0')
+            if direct_nas not in ('0','1'):
+                raise ValueError('GAMESHELF_DIRECT_NAS must be 0 or 1')
+            export_root = env.get('GAMESHELF_WORKSPACE_EXPORT_ROOT') or None
+            manifest = env.get('GAMESHELF_WORKSPACE_MANIFEST') or None
+            if bool(export_root) != bool(manifest) or (
+                export_root and (direct_nas != '1' or not Path(export_root).is_absolute()
+                                 or not Path(manifest).is_absolute())
+            ):
+                raise ValueError('Workspace exports require direct NAS mode and absolute root and manifest paths')
+            enrollment_socket = env.get('GAMESHELF_SMB_ENROLLMENT_SOCKET') or None
+            verification_share = env.get('GAMESHELF_SMB_VERIFICATION_SHARE') or None
+            if bool(enrollment_socket) != bool(verification_share) or (
+                enrollment_socket and (not export_root or not Path(enrollment_socket).is_absolute()
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', verification_share))
+            ):
+                raise ValueError('SMB enrollment requires a host socket, verification share and mounted exports')
             smb_host = env['GAMESHELF_SMB_HOST']
             if not smb_host or any(c.isspace() or c in '/\\@?#' for c in smb_host):
                 raise ValueError('Invalid SMB hostname')
+            windows_smb_host = env.get('GAMESHELF_WINDOWS_SMB_HOST') or None
+            if windows_smb_host is not None:
+                address = ipaddress.IPv4Address(windows_smb_host)
+                private_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10')
+                if not any(address in ipaddress.IPv4Network(network) for network in private_ranges):
+                    raise ValueError('Windows SMB host must be a private LAN or overlay-network IPv4 address')
             origin = env.get('GAMESHELF_PUBLIC_ORIGIN') or None
             if origin:
                 from urllib.parse import urlsplit
@@ -71,7 +102,9 @@ class Settings:
                 raise ValueError('Bootstrap requires username and a secret file (never a password environment variable)')
             return cls(state, [Path(p) for p in sources], host, number('GAMESHELF_PORT',8443,1,65535),
                        smb_host,number('GAMESHELF_SMB_PORT',1445,1,65535),cert,key,origin,
-                       number('GAMESHELF_TOKEN_TTL',86400,60,2592000),number('GAMESHELF_LEASE_TTL',90,15,600),user,file,invitation_address,invitation_pin)
+                       number('GAMESHELF_TOKEN_TTL',86400,60,2592000),number('GAMESHELF_LEASE_TTL',90,15,600),user,file,invitation_address,invitation_pin,windows_smb_host,direct_nas=='1',
+                       Path(export_root) if export_root else None, Path(manifest) if manifest else None,
+                       Path(enrollment_socket) if enrollment_socket else None, verification_share)
         except (KeyError,TypeError,json.JSONDecodeError) as e:
             raise ValueError('Missing or invalid gateway configuration') from e
 
@@ -98,6 +131,20 @@ def bootstrap(service, username, password_file):
         password = f.read(1026).rstrip('\r\n')
     service.create_user(username,password,True)
 
+def record_workspace_export_root(database, root):
+    """Recovery needs the original export mount while any lease is reserved."""
+    previous = database.execute("SELECT value FROM settings WHERE key='workspaceExportRoot'").fetchone()
+    identity = json.dumps([str(root), root.stat().st_ino]) if root is not None else None
+    if previous and previous[0] != identity and database.execute(
+        "SELECT 1 FROM leases WHERE status!='closed' LIMIT 1"
+    ).fetchone():
+        raise ValueError('Restore the original workspace export mount before recovering leases')
+    if identity is None:
+        database.execute("DELETE FROM settings WHERE key='workspaceExportRoot'")
+    else:
+        database.execute("INSERT OR REPLACE INTO settings VALUES ('workspaceExportRoot',?)", (identity,))
+
+
 def serve(cfg):
     if sys.platform != 'linux' or os.geteuid() != 0 or os.environ.get('GAMESHELF_CONTAINER') != '1':
         raise RuntimeError('Gateway driver runs only as root inside the supplied isolated Linux container')
@@ -110,7 +157,33 @@ def serve(cfg):
     with state_lock(state):
         driver = LinuxDriver(state,cfg.smb_host,cfg.smb_port)
         driver.validate(sources)
-        service = Service(state,driver,sources,token_ttl=cfg.token_ttl,lease_ttl=cfg.lease_ttl)
+        service = Service(state,driver,sources,token_ttl=cfg.token_ttl,lease_ttl=cfg.lease_ttl,direct_nas=cfg.direct_nas)
+        if cfg.workspace_export_root is not None:
+            from .workspace_export import load_runtime_exports
+            accounts = dict(service.db.execute('SELECT id,uid FROM users'))
+            driver.workspace_exports = load_runtime_exports(
+                cfg.workspace_export_root, cfg.workspace_manifest, accounts,
+                [state, *sources], driver.run, driver.mount_probe,
+                allow_empty=cfg.smb_enrollment_socket is not None)
+        if cfg.smb_enrollment_socket is not None:
+            from .smb_enrollment import SMBEnrollment, SMBEnrollmentAPI
+            from .smb_enrollment_channel import SMBEnrollmentHostClient
+            enrollment = SMBEnrollment(service.db)
+            exports = driver.workspace_exports
+
+            def register_share(account, share):
+                row = service.db.execute('SELECT uid FROM users WHERE id=?', (account,)).fetchone()
+                if row is None:
+                    raise ValueError('Unknown workspace account')
+                exports.register(account,row[0],share)
+
+            for account, share in enrollment.ready_workspaces():
+                register_share(account,share)
+            service.smb_enrollment_api = SMBEnrollmentAPI(
+                enrollment,SMBEnrollmentHostClient(cfg.smb_enrollment_socket),
+                cfg.smb_verification_share,register_share=register_share,
+                existing_share=exports.shares.get)
+        record_workspace_export_root(service.db, cfg.workspace_export_root)
         service.display_name = os.environ.get('GAMESHELF_SERVER_NAME','GameShelf').strip()[:80] or 'GameShelf'
         server = None
         stopping = threading.Event()
@@ -121,6 +194,8 @@ def serve(cfg):
         control = None
         try:
             bootstrap(service,cfg.bootstrap_user,cfg.bootstrap_file)
+            from .mz_lease_storage import load_reviewed_mz_storage
+            driver.mz_sync = load_reviewed_mz_storage(service)
             driver.start()
             service.recover()  # No API is listening until stale writers close.
             from .control import AdminControl
@@ -128,7 +203,7 @@ def serve(cfg):
             pending_control.__enter__()
             control = pending_control
             server = make_server(service,cfg.host,cfg.port,cert=cfg.cert,key=cfg.key,public_origin=cfg.public_origin,
-                                 public_address=cfg.public_address,certificate_sha256=cfg.certificate_sha256)
+                                 public_address=cfg.public_address,certificate_sha256=cfg.certificate_sha256,windows_smb_host=cfg.windows_smb_host)
             server.timeout = 0.5
             def reap():
                 while not stopping.wait(2):

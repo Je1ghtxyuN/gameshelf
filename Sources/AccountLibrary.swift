@@ -21,6 +21,24 @@ struct AccountLibraryIdentity:Codable,Equatable {
 }
 struct AccountLibraryUser:Codable {var id:String;var username:String;var admin:Bool}
 struct AccountLibraryCollection:Codable {var id:UUID;var name:String}
+struct AccountLibraryNASSource: Codable, Equatable {
+ var rootID: String
+ var relative: String
+
+ static func validRootID(_ value: String) -> Bool {
+  value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+ }
+
+ var isValid: Bool { Self.validRootID(rootID) && Self.validRelativePath(relative) }
+
+ static func validRelativePath(_ relative: String) -> Bool {
+  guard relative.utf8.count <= 4096,
+        !relative.contains("\\"), !relative.contains(":"),
+        !relative.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return false }
+  return relative == "." || relative.split(separator: "/", omittingEmptySubsequences: false)
+   .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+ }
+}
 struct AccountLibraryVariant:Codable {
  var id:String
  var platform:String
@@ -29,6 +47,9 @@ struct AccountLibraryVariant:Codable {
  var entries:[Candidate]
  var saveCompatibilityKey:String?
  var available:Bool
+ var nasSource:AccountLibraryNASSource?=nil
+ var requiresAccountWorkspace:Bool?=nil
+ var permitsDirectNAS:Bool { requiresAccountWorkspace != true && saveCompatibilityKey == nil }
 }
 struct AccountLibrarySelection {let variant:AccountLibraryVariant;let entry:Candidate}
 struct AccountLibraryPreferredEntry:Codable {var variantID:String;var entryPath:String}
@@ -66,7 +87,11 @@ struct AccountLibraryGame:Codable {
   guard !entry.path.contains("\\"),!entry.path.contains(":"),!entry.path.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains),pieces.allSatisfy({!$0.isEmpty && $0 != "." && $0 != ".."}) else{return false}
   if platform=="macos" {return entry.backend == .native && entry.path.lowercased().hasSuffix(".app")}
   if platform=="web" {return entry.backend == .web || entry.backend == .rpgmz}
-  return platform=="windows" && entry.backend != .native && entry.path.lowercased().hasSuffix(".exe")
+  guard platform=="windows", [.wine,.renpy,.rpgmz].contains(entry.backend),
+        entry.path.lowercased().hasSuffix(".exe") else{return false}
+  // Ren'Py can fall back to Wine, so apply the same Windows path rules even
+  // when the backend is currently eligible for a native SDK.
+  return (try? EntryPolicy.validate(Candidate(path:entry.path,backend:.wine,engine:entry.engine))) != nil
  }
 }
 struct AccountLibraryDocument:Codable {
@@ -75,6 +100,9 @@ struct AccountLibraryDocument:Codable {
  var user:AccountLibraryUser
  var games:[AccountLibraryGame]
  var collections:[AccountLibraryCollection]
+ var directNas:Bool?=nil
+ var mountedWorkspaceShare:String?=nil
+ var smbEnrollmentAvailable:Bool?=nil
  func validate(identity:AccountLibraryIdentity)throws {
   func id(_ value:String)->Bool{value.count==32 && value.utf8.allSatisfy{(48...57).contains($0)||(97...102).contains($0)}}
   func text(_ value:String,_ limit:Int)->Bool{!value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && value.utf8.count<=limit && !value.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains)}
@@ -94,6 +122,13 @@ struct AccountLibraryDocument:Codable {
    var platforms=Set<String>()
    for variant in game.variants {
     guard id(variant.id),(editionOwners[variant.id]==nil || editionOwners[variant.id]==game.id),platforms.insert(variant.id+":"+variant.platform).inserted,["macos","windows","web"].contains(variant.platform),variant.entries.count<=256,variant.version.map({text($0,128)}) ?? true,variant.label.map({text($0,1024)}) ?? true,variant.saveCompatibilityKey.map({text($0,128)}) ?? true else{throw LibraryError("游戏版本资料无效。")}
+    if let source = variant.nasSource {
+     guard source.isValid,
+           (variant.platform == "windows" && (directNas == true || user.admin)) ||
+           (variant.platform == "macos" && directNas == true) else {
+      throw LibraryError("NAS 游戏来源无效。")
+     }
+    }
     editionOwners[variant.id]=game.id
    }
   }

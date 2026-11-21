@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -62,6 +63,27 @@ class NamespaceDriverTests(unittest.TestCase):
         unmounts=[(i,c[-1]) for i,c in enumerate(self.commands) if c[0]=='umount']
         self.assertLess(close,unmounts[0][0]); self.assertEqual(unmounts[0][1],target)
         self.assertEqual([p for _,p in unmounts[1:]],[str(self.d.paths(lease)['merged']),str(self.d.paths(lease)['lower'])])
+
+    def test_windows_images_are_executable_only_in_the_private_view(self):
+        lease,context,source,user=self.driver_case()
+        runtime=source/'lib/py3-windows-x86_64'
+        runtime.mkdir(parents=True)
+        image=b'MZ'+bytes(58)+(64).to_bytes(4,'little')+b'PE\0\0'
+        for name,data in [('Game.exe',image),('python39.dll',image),('_renpy.pyd',image),('fake.dll',b'plain data')]:
+            (runtime/name).write_bytes(data)
+        (source/'game/installer.exe').write_bytes(image)
+        expected=['Play.exe','lib/py3-windows-x86_64/Game.exe','lib/py3-windows-x86_64/python39.dll',
+                  'lib/py3-windows-x86_64/_renpy.pyd']
+        other=['game/installer.exe','lib/py3-windows-x86_64/fake.dll','renpy/main.py']
+        for name in expected+other:
+            (source/name).chmod(0o600)
+
+        self.open(lease,context,source,user)
+
+        view=self.d.paths(lease)['merged']
+        self.assertTrue(all((view/name).stat().st_mode & stat.S_IXUSR for name in expected))
+        self.assertTrue(all(not (view/name).stat().st_mode & stat.S_IXUSR for name in other))
+        self.assertTrue(all(stat.S_IMODE((source/name).stat().st_mode)==0o600 for name in expected+other))
 
     def test_child_unmount_failure_preserves_overlay_barrier(self):
         lease,context,source,user=self.driver_case(); self.open(lease,context,source,user)

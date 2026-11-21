@@ -213,27 +213,30 @@ extension Wrapper {
   // Keep classic Wine waits when MSync's Darwin name cannot represent the inode.
   return ["WINEMSYNC":msync ? "1":"0","WINEESYNC":msync ? "1":"0"]
  }
- static func launchSpec(game:Game,runtime:URL,seedRenderCache:Bool=true) throws -> LaunchSpec {
+ static func launchSpec(game:Game,runtime:URL,seedRenderCache:Bool=true,directNAS:Bool=false) throws -> LaunchSpec {
   try EntryPolicy.validate(game.entry)
   let directory=URL(fileURLWithPath:game.folder)
   var environment=ProcessInfo.processInfo.environment
   environment["WINEPREFIX"]=runtime.appendingPathComponent("Contents/SharedSupport/prefix").path
   environment["DYLD_FALLBACK_LIBRARY_PATH"]=runtime.appendingPathComponent("Contents/Frameworks").path
-  environment.merge(try WineRenderCachePolicy.prepare(game:game,runtime:runtime,migrateLegacy:seedRenderCache)){_,new in new}
+  let cacheRoot=directNAS ? runtime.deletingLastPathComponent().deletingLastPathComponent() : WineRenderCachePolicy.defaultRoot
+  environment.merge(try WineRenderCachePolicy.prepare(game:game,runtime:runtime,root:cacheRoot,migrateLegacy:seedRenderCache && !directNAS)){_,new in new}
   environment["GAMESHELF_PROFILE"]=game.showPerformanceHUD==true ? "1":"0"
   environment["DXVK_HUD"]=game.showPerformanceHUD==true ? "fps,frametimes,gpuload,compiler":"0"
   environment["WINEDEBUG"]="-all,err+all,+msgbox"
   environment["WINEDLLOVERRIDES"]="winemenubuilder.exe=d"
+  let graphics=inheritedGraphicsOverrides(runtime:runtime)
+  if !graphics.isEmpty{environment["WINEDLLOVERRIDES"]! += ";"+graphics}
   if game.shared != nil {
    // Wine-side Unix helpers also receive an account-private home. Caches remain
    // local; no environment variable points them at another account's user data.
-   environment["HOME"]=directory.appendingPathComponent(".gameshelf-profile/UnixHome").path
+   environment["HOME"]=(directNAS ? runtime.appendingPathComponent("Contents/SharedSupport/DirectNASProfile/UnixHome"):directory.appendingPathComponent(".gameshelf-profile/UnixHome")).path
   }
   environment.removeValue(forKey:"GAMESHELF_WINDOW_BOUNDS")
   let prefix=runtime.appendingPathComponent("Contents/SharedSupport/prefix")
   let inode=(try? FileManager.default.attributesOfItem(atPath:prefix.path)[.systemFileNumber] as? NSNumber)?.uint64Value
   environment.merge(syncSettings(inode:inode)){_,new in new}
-  var arguments=[directory.appendingPathComponent(game.entry.path).path]
+  var arguments=[directNAS ? "G:\\"+game.entry.path.replacingOccurrences(of:"/",with:"\\"):directory.appendingPathComponent(game.entry.path).path]
   if let size=game.windowSize {
    guard ["1280x720","1024x768"].contains(size) else{throw LibraryError("窗口区域设置无效。")}
    let preparedRGSS=game.entry.engine=="RPG Maker VX Ace" &&
@@ -249,13 +252,89 @@ extension Wrapper {
  // Construct alongside launchSpec; execute after the wine64 process exits. A
  // successful wait means all Wine processes in THIS prefix have ended. Do not
  // release the app's running/copy guard merely because the initial EXE exited.
- static func stopSpec(game:Game,runtime:URL) throws -> LaunchSpec {
-  var spec=try waitSpec(game:game,runtime:runtime)
+ static func stopSpec(game:Game,runtime:URL,directNAS:Bool=false) throws -> LaunchSpec {
+  var spec=try waitSpec(game:game,runtime:runtime,directNAS:directNAS)
   spec.arguments=["-k"]
   return spec
  }
- static func waitSpec(game:Game,runtime:URL) throws -> LaunchSpec {
-  let launch=try launchSpec(game:game,runtime:runtime,seedRenderCache:false)
+ static func waitSpec(game:Game,runtime:URL,directNAS:Bool=false) throws -> LaunchSpec {
+  let launch=try launchSpec(game:game,runtime:runtime,seedRenderCache:false,directNAS:directNAS)
   return LaunchSpec(executable:runtime.appendingPathComponent("Contents/SharedSupport/wine/bin/wineserver"),arguments:["-w"],directory:runtime.appendingPathComponent("Contents/SharedSupport/prefix"),environment:launch.environment)
+ }
+}
+
+extension Wrapper {
+ // Carry only explicitly configured native graphics libraries from the chosen
+ // engine into a fresh account prefix. Never inherit its user registry/data.
+ static func inheritNativeGraphics(runtime:URL)throws {
+  let fm=FileManager.default,support=runtime.appendingPathComponent("Contents/SharedSupport")
+  let link=support.appendingPathComponent("wine")
+  let receipt=support.appendingPathComponent("native-graphics.json")
+  func clearReceipt()throws {
+   if let type=try? fm.attributesOfItem(atPath:receipt.path)[.type] as? FileAttributeType {
+    guard type == .typeRegular || type == .typeSymbolicLink else{throw LibraryError("Wine 图形组件记录位置异常。")}
+    try fm.removeItem(at:receipt)
+   }
+  }
+  guard let raw=try? fm.destinationOfSymbolicLink(atPath:link.path) else{try clearReceipt();return}
+  let engine=URL(fileURLWithPath:raw,relativeTo:support).standardizedFileURL.deletingLastPathComponent()
+  let source=engine.appendingPathComponent("prefix")
+  guard let registry=try? String(contentsOf:source.appendingPathComponent("user.reg"),encoding:.utf8) else{try clearReceipt();return}
+  let allowed:Set<String>=["d3d8","d3d9","d3d10core","d3d11","dxgi","d3dcompiler_43","d3dcompiler_47"]
+  var active=false,modes:[String:String]=[:]
+  for line in registry.components(separatedBy:.newlines) {
+   if line.hasPrefix("["){active=line.components(separatedBy:"]").first=="[Software\\\\Wine\\\\DllOverrides";continue}
+   guard active else{continue}
+   let fields=line.components(separatedBy:"=")
+   guard fields.count==2 else{continue}
+   let name=fields[0].trimmingCharacters(in:CharacterSet(charactersIn:"\"* ")).lowercased()
+   let mode=fields[1].trimmingCharacters(in:CharacterSet(charactersIn:"\" ")).lowercased()
+   if allowed.contains(name),["native","native,builtin","n","n,b"].contains(mode){modes[name]=["native","n"].contains(mode) ? "n":"n,b"}
+  }
+  guard !modes.isEmpty else{try clearReceipt();return}
+  let prefix=support.appendingPathComponent("prefix")
+  var inherited:[String:String]=[:]
+  for name in modes.keys.sorted() {
+   var copied=false
+   for arch in ["system32","syswow64"] {
+    let relative="drive_c/windows/"+arch+"/"+name+".dll"
+    let input=source.appendingPathComponent(relative)
+    guard (try? fm.attributesOfItem(atPath:input.path)[.type] as? FileAttributeType) == .typeRegular else{continue}
+    let bytes=try Data(contentsOf:input)
+    guard bytes.starts(with:[0x4d,0x5a]) else{throw LibraryError("Wine 图形组件不是有效的 Windows 程序："+name)}
+    var directory=prefix
+    for part in ["drive_c","windows",arch] {
+     directory.appendPathComponent(part)
+     if !fm.fileExists(atPath:directory.path){try fm.createDirectory(at:directory,withIntermediateDirectories:false)}
+     guard try fm.attributesOfItem(atPath:directory.path)[.type] as? FileAttributeType == .typeDirectory,
+           directory.resolvingSymlinksInPath().path.hasPrefix(prefix.resolvingSymlinksInPath().path+"/") else{throw LibraryError("Wine 图形组件目录包含外部链接。")}
+    }
+    let output=prefix.appendingPathComponent(relative)
+    if (try? fm.destinationOfSymbolicLink(atPath:output.path)) != nil{throw LibraryError("Wine 图形组件包含外部链接。")}
+    if (try? Data(contentsOf:output)) != bytes {
+     if fm.fileExists(atPath:output.path) {
+      var backupDirectory=support
+      for part in ["GraphicsDependencyBackup",UUID().uuidString,"drive_c","windows",arch] {
+       backupDirectory.appendPathComponent(part)
+       if !fm.fileExists(atPath:backupDirectory.path){try fm.createDirectory(at:backupDirectory,withIntermediateDirectories:false)}
+       guard try fm.attributesOfItem(atPath:backupDirectory.path)[.type] as? FileAttributeType == .typeDirectory,
+             backupDirectory.resolvingSymlinksInPath().path.hasPrefix(support.resolvingSymlinksInPath().path+"/") else{throw LibraryError("Wine 图形组件备份目录包含外部链接。")}
+      }
+      try fm.copyItem(at:output,to:backupDirectory.appendingPathComponent(name+".dll"))
+     }
+     try bytes.write(to:output,options:.atomic)
+    }
+    copied=true
+   }
+   if copied{inherited[name]=modes[name]}
+  }
+  if (try? fm.destinationOfSymbolicLink(atPath:receipt.path)) != nil{throw LibraryError("Wine 图形组件记录包含外部链接。")}
+  try JSONEncoder().encode(inherited).write(to:receipt,options:.atomic)
+ }
+ static func inheritedGraphicsOverrides(runtime:URL)->String {
+  let receipt=runtime.appendingPathComponent("Contents/SharedSupport/native-graphics.json")
+  guard let data=try? Data(contentsOf:receipt),let modes=try? JSONDecoder().decode([String:String].self,from:data) else{return ""}
+  let allowed:Set<String>=["d3d8","d3d9","d3d10core","d3d11","dxgi","d3dcompiler_43","d3dcompiler_47"]
+  return modes.keys.sorted().filter{allowed.contains($0) && ["n","n,b"].contains(modes[$0] ?? "")}.map{$0+"="+modes[$0]!}.joined(separator:";")
  }
 }

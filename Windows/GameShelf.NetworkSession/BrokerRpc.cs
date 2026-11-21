@@ -12,8 +12,22 @@ public sealed class BrokerRpc(Stream stream,Guid operation)
             var frame=BrokerWire.Encode(request);timeout.Token.ThrowIfCancellationRequested();written=true;sequence++;
             await stream.WriteAsync(frame,timeout.Token);await stream.FlushAsync(timeout.Token);var reply=await BrokerWire.Read<BrokerReply>(stream,timeout.Token);
             if(reply.Version!=1||reply.Operation!=operation||reply.Sequence!=sequence||reply.Command!=command)throw new BrokerFailure(BrokerStage.Protocol);
-            if(!reply.Success){if(reply.Error is not BrokerStage stage||!Enum.IsDefined(stage)||reply.Status!=null||reply.NativeCode is <0 or >65535)throw new BrokerFailure(BrokerStage.Protocol);completed=true;throw new BrokerFailure(stage,reply.NativeCode);}
-            var status=reply.Status??throw new BrokerFailure(BrokerStage.Protocol);if(reply.Error!=null||reply.NativeCode!=null)throw new BrokerFailure(BrokerStage.Protocol);completed=true;return status;
+            if (!reply.Success)
+            {
+                if (reply.Error is not BrokerStage stage || !Enum.IsDefined(stage)
+                    || reply.Status != null || reply.NativeCode is < 0 or > 65535
+                    || (reply.SmbStage is { } smb && !Enum.IsDefined(smb))
+                    || (reply.MappingNotAttempted.HasValue && command != BrokerCommand.Connect)
+                    || (reply.MappingNotAttempted == true && reply.SmbStage is not (null or SmbOperationStage.Preflight)))
+                    throw new BrokerFailure(BrokerStage.Protocol);
+                completed = true;
+                throw new BrokerFailure(stage, reply.NativeCode, reply.SmbStage, reply.MappingNotAttempted);
+            }
+            var status = reply.Status ?? throw new BrokerFailure(BrokerStage.Protocol);
+            if (reply.Error != null || reply.NativeCode != null || reply.SmbStage != null || reply.MappingNotAttempted.HasValue)
+                throw new BrokerFailure(BrokerStage.Protocol);
+            completed = true;
+            return status;
         }catch(BrokerFailure){if(written&&!completed){poisoned=true;stream.Dispose();}throw;}catch{if(written&&!completed){poisoned=true;stream.Dispose();}throw new BrokerFailure(BrokerStage.Transport);}finally{serial.Release();}
     }
 }

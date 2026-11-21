@@ -47,8 +47,21 @@ private final class MountFixture {
  }
 }
 
+private func verifyExistingShareSelection() throws {
+ let fixture = MountFixture()
+ let matching = fixture.identity(source:"//member@nas.example/account-workspace")
+ let other = fixture.identity(source:"//member@nas.example/games")
+ let matchingRoot = try NetworkLibraryMount.existingShareRoot(named:"ACCOUNT-WORKSPACE", mounts:[other,matching])
+ try check(matchingRoot?.path == matching.target, "Mounted account share was not selected")
+ try check(try NetworkLibraryMount.existingShareRoot(named:"account-workspace", mounts:[other]) == nil, "Selected a different share")
+ try rejects { _ = try NetworkLibraryMount.existingShareRoot(named:"account-workspace",
+  mounts:[matching,fixture.identity(source:"//member@another.example/account-workspace",target:"/Volumes/Other")]) }
+}
+
 @main struct NetworkLibraryMountTests {
  static func main() throws {
+  try verifyExistingShareSelection()
+  try alreadyDetached()
   if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--recover-receipt" {
    let f = MountFixture(); f.state = .mounted(f.identity())
    guard let recovered = try NetworkLibraryMount.recoverReceipt(at: URL(fileURLWithPath: CommandLine.arguments[2]),
@@ -68,6 +81,23 @@ private final class MountFixture {
    }
   }
   print("PASS NetworkLibraryMount: validation, secret separation, mount identity/ownership, safe targets/unmount, persisted recovery across processes (no network mounts)")
+ }
+ static func alreadyDetached() throws {
+  let fixture = MountFixture()
+  let original = fixture.state
+  let mounted = try NetworkLibraryMount.mount(share: fixtureShare, at: fixture.target, operations: fixture.operations)
+  fixture.state = original
+  try NetworkLibraryMount.unmount(mounted, acceptAlreadyDetached: true, operations: fixture.operations)
+  try check(fixture.unmountCalls == 0, "A detached volume needs no unmount syscall")
+  fixture.state = .mounted(fixture.identity())
+  try rejects { try NetworkLibraryMount.unmount(mounted, acceptAlreadyDetached: true, operations: fixture.operations) }
+  try check(fixture.unmountCalls == 0, "A consumed handle must not unmount a replacement")
+
+  fixture.state = original
+  let second = try NetworkLibraryMount.mount(share: fixtureShare, at: fixture.target, operations: fixture.operations)
+  fixture.state = .directory(device: 1, inode: 3, owner: geteuid(), empty: true)
+  try rejects { try NetworkLibraryMount.unmount(second, acceptAlreadyDetached: true, operations: fixture.operations) }
+  try check(fixture.unmountCalls == 0, "A replacement directory is not the original mount point")
  }
  static func validation() throws {
   let url = try fixtureShare.mountURL()

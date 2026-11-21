@@ -21,6 +21,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
  private var volumeViews: [String: [(NSTextField, NSProgressIndicator)]] = [:]
  private var volumeGeneration = 0
  private var validating = false
+ private var smbEnrollmentInProgress = false
  private var validationID = UUID()
  private let probeQueue = DispatchQueue(label: "GameShelf.settings.volumes", qos: .utility, attributes: .concurrent)
  private let validationQueue = DispatchQueue(label: "GameShelf.settings.validation", qos: .userInitiated)
@@ -316,11 +317,62 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
    button("切换账号"){[weak app] in app?.requestAccountSwitch()},
    button("退出登录"){[weak app] in app?.requestAccountSwitch()}
   ]
+  if app.accountLibrary?.document?.smbEnrollmentAvailable == true {
+   controls.insert(button("NAS 存档接入…"){[weak self] in self?.enrollSMB(connection)},at:1)
+  }
   if connection.isAdministrator {
    controls.insert(button("账号管理"){[weak self] in self?.openAdministration(connection)},at:1)
   }
   card("账号",views:[label(connection.username,size:16,weight:.medium),label(connection.isAdministrator ? "管理员":"普通账号",secondary:true),actions(controls)])
  }
+ private func enrollSMB(_ connection: SharedConnection) {
+  guard !smbEnrollmentInProgress, let app, let window,
+        app.activeLibraryConnection?.id == connection.id else { return }
+  smbEnrollmentInProgress = true
+  Task { @MainActor [weak self, weak app, weak window] in
+   guard let self else { return }
+   defer { self.smbEnrollmentInProgress = false }
+   guard let app, let window else { return }
+   do {
+    guard let token = try app.sharedToken(for: connection) else { throw LibraryError("请重新登录。") }
+    let api = try SharedAPI(address: connection.address, certificateSHA256: connection.certificateSHA256)
+    let path = "/api/account/smb-enrollment"
+    let status: SMBEnrollmentStatus = try await api.value(path, token: token)
+    guard app.activeLibraryConnection?.id == connection.id else { return }
+    if status.state == "unverified" {
+     let dialog = NSAlert()
+     dialog.messageText = "验证 NAS 账号"
+     dialog.addButton(withTitle: "验证")
+     dialog.addButton(withTitle: "取消")
+     let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+     input.placeholderString = "SMB 用户名"
+     dialog.accessoryView = input
+     guard await dialog.beginSheetModal(for: window) == .alertFirstButtonReturn,
+           app.activeLibraryConnection?.id == connection.id else { return }
+     let challenge: SMBEnrollmentChallenge = try await api.value(path+"/challenge", method:"POST", token:token,
+      body:["username":input.stringValue.trimmingCharacters(in:.whitespacesAndNewlines)])
+     let proof = try await Task.detached(priority: .userInitiated) { try challenge.readProof() }.value
+     guard app.activeLibraryConnection?.id == connection.id else { return }
+     let verified: SMBEnrollmentStatus = try await api.value(path+"/proof", method:"POST", token:token,
+      body:["challengeID":challenge.challengeID,"proof":proof])
+     guard verified.state == "verified" else { throw LibraryError("NAS 账号验证未完成。") }
+    } else if status.state != "verified" && status.state != "ready" {
+     throw LibraryError("服务器返回的 SMB 接入状态无效。")
+    }
+    guard app.activeLibraryConnection?.id == connection.id else { return }
+    let ready: SMBEnrollmentStatus = status.state == "ready" ? status :
+     try await api.value(path+"/workspace", method:"POST", token:token, body:[:])
+    guard app.activeLibraryConnection?.id == connection.id else { return }
+    guard ready.state == "ready", let share = ready.share else { throw LibraryError("NAS 存档工作区未就绪。") }
+    app.refreshAccountLibrary()
+    self.report("请在 Finder 中连接 NAS 的「"+share+"」共享。")
+   } catch {
+    guard app.activeLibraryConnection?.id == connection.id else { return }
+    self.report(error.localizedDescription)
+   }
+  }
+ }
+
  private func openAdministration(_ connection: SharedConnection) {
   guard let app,connection.isAdministrator,app.activeLibraryConnection?.id==connection.id else{return}
   do {
@@ -348,21 +400,66 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
   var contents:[NSView]=[label(connection.name,size:16,weight:.medium),label(connection.address,size:12,secondary:true),roots]
   var controls:[NSView]=[button("刷新游戏库"){[weak app] in app?.refreshAccountLibrary()}]
   if connection.isAdministrator{controls.append(button("管理服务器文件夹…"){[weak app] in app?.showAccountDiscovery()})}
+  let localRoots = vertical([], spacing: 11)
+  contents.append(localRoots)
   contents.append(actions(controls));card("服务器游戏文件夹",views:contents)
   let ticket=rootsRequest
   do {
    guard let token=try app.sharedToken(for:connection) else{roots.stringValue="请重新登录。";return}
    let api=try SharedAPI(address:connection.address,certificateSHA256:connection.certificateSHA256)
-   api.request("/api/library/roots",token:token){[weak self,weak roots] (result:Result<SettingsLibraryRoots,Error>) in
+   api.request("/api/library/roots",token:token){[weak self,weak roots,weak localRoots] (result:Result<SettingsLibraryRoots,Error>) in
     DispatchQueue.main.async {
      guard let self,!self.closed,self.rootsRequest==ticket,self.app?.activeLibraryConnection?.id==connection.id,let roots else{return}
      switch result {
-     case .success(let value):roots.stringValue=value.roots.isEmpty ? "尚未配置文件夹":value.roots.map{$0.title}.joined(separator:"\n")
+     case .success(let value):
+      if let localRoots, let account = self.app?.accountLibrary, account.document?.directNas == true,
+         let profile = account.profileRoot, !value.roots.isEmpty {
+       roots.isHidden = true
+       for source in value.roots {
+        let folder = try? DirectNASRoot.folder(rootID: source.id, profile: profile)
+        let location = folder.map(self.path) ?? self.label("尚未选择 NAS 根目录", secondary: true)
+        localRoots.addArrangedSubview(self.label(source.title))
+        localRoots.addArrangedSubview(location)
+        localRoots.addArrangedSubview(self.actions([self.button("选择 NAS 根目录…") { [weak self, weak account] in
+         guard let account else { return }
+         self?.chooseNASRoot(source.id, account: account, profile: profile)
+        }]))
+       }
+      } else {
+       roots.stringValue = value.roots.isEmpty ? "尚未配置文件夹" : value.roots.map(\.title).joined(separator: "\n")
+      }
      case .failure(let error):roots.stringValue=error.localizedDescription
      }
     }
    }
   }catch{roots.stringValue=error.localizedDescription}
+ }
+
+ private func chooseNASRoot(_ rootID: String, account: AccountLibraryController, profile: URL) {
+  guard !validating, let window, window.attachedSheet == nil,
+        app?.accountLibrary === account, app?.accountGameIsRunning == false else { return }
+  let panel = NSOpenPanel()
+  panel.title = "选择已挂载的 NAS 根目录"
+  panel.prompt = "选择"
+  panel.canChooseDirectories = true
+  panel.canChooseFiles = false
+  panel.canCreateDirectories = false
+  panel.beginSheetModal(for: window) { [weak self, weak account] response in
+   guard let self, !self.closed, let account, self.app?.accountLibrary === account,
+         self.app?.accountGameIsRunning == false, response == .OK, let folder = panel.url else { return }
+   self.validating = true
+   self.validationQueue.async {
+    let result = Result { try DirectNASRoot.bind(rootID: rootID, folder: folder, profile: profile) }
+    DispatchQueue.main.async {
+     self.validating = false
+     guard !self.closed, self.app?.accountLibrary === account else { return }
+     switch result {
+     case .success: self.renderPage()
+     case .failure(let error): self.report(error.localizedDescription)
+     }
+    }
+   }
+  }
  }
 
  private func storageCard(_ title: String, detail: String, url: URL, runtime: Bool) {

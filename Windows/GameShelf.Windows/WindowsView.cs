@@ -42,7 +42,6 @@ public sealed class WindowsView(IMappingBackend? mappingBackend=null):IReviewedW
         ct.ThrowIfCancellationRequested();return Task.FromResult<IGameProcess>(NativeJob.Start(full,Path.GetDirectoryName(full)!,cancellation:ct));
     }
 }
-public enum SmbOperationStage { Initialize,Preflight,Create,Verify,Cleanup,Remove,Acknowledge,Timeout }
 public sealed class SmbMappingException(SmbOperationStage stage,int? win32Error):InvalidOperationException($"SMB 账号视图操作失败：{stage}"+(win32Error is int code?$" (Win32 {code})":""))
 {
     public SmbOperationStage Stage {get;}=stage;
@@ -65,6 +64,32 @@ public sealed class ShellMappingBackend:IMappingBackend
             return ChooseAvailableDrive(visible,mapped);
         }catch(SmbMappingException){throw;}
         catch{throw new SmbMappingException(SmbOperationStage.Preflight,null);}
+    }
+    internal static async Task<string> ExistingShareRoot(string share,CancellationToken ct)
+    {
+        const string query = "$stage='Preflight';$mappings=@(Get-SmbMapping -ErrorAction Stop | Where-Object {[int]$_.Status -eq 0} | Select-Object LocalPath,RemotePath);ConvertTo-Json -InputObject $mappings -Compress";
+        var json = await PowerShell(query,new{},TimeSpan.FromSeconds(10),ct);
+        if (json.Length > 32768) throw new InvalidDataException("NAS 映射列表无效。");
+        var mappings = JsonSerializer.Deserialize<ExistingMapping[]>(json) ?? throw new InvalidDataException("NAS 映射列表无效。");
+        return ResolveExistingShare(share,mappings);
+    }
+
+    internal sealed record ExistingMapping(string? LocalPath,string? RemotePath);
+
+    internal static string ResolveExistingShare(string share, IEnumerable<ExistingMapping> mappings)
+    {
+        var matches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var mapping in mappings)
+        {
+            if (mapping.LocalPath is not { Length: 2 } drive || drive[1] != ':' || !char.IsAsciiLetter(drive[0]) ||
+                mapping.RemotePath is not { } unc || !unc.StartsWith(@"\\",StringComparison.Ordinal)) continue;
+            var parts = unc[2..].TrimEnd('\\').Split('\\');
+            if (parts.Length == 2 && Uri.CheckHostName(parts[0]) != UriHostNameType.Unknown &&
+                string.Equals(parts[1],share,StringComparison.OrdinalIgnoreCase))
+                matches.Add(drive+@"\");
+        }
+        if (matches.Count != 1) throw new InvalidOperationException("请在资源管理器中连接唯一的 NAS 账号工作区网络驱动器「"+share+"」。");
+        return matches.Single();
     }
     internal static string ChooseAvailableDrive(IEnumerable<string> visible,IEnumerable<string> mapped)
     {

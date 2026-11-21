@@ -17,6 +17,19 @@ import Foundation
   var sharedEdition=mac;sharedEdition.id=win.id
   combined.games[0].variants=[win,sharedEdition]
   try combined.validate(identity:owner)
+  var family=combined
+  family.directNas=true
+  family.games[0].variants[1].nasSource=AccountLibraryNASSource(rootID:sid,relative:"Games/Example.app")
+  try family.validate(identity:owner)
+  let decoded=try JSONDecoder().decode(AccountLibraryDocument.self,from:JSONEncoder().encode(family))
+  try check(decoded.games[0].variants[1].nasSource==family.games[0].variants[1].nasSource,"NAS source lost in round trip")
+  family.directNas=false
+  try rejects{try family.validate(identity:owner)}
+  family.directNas=true
+  for path in ["", "/outside", "game/../outside", "game//outside", "game:/outside"] {
+   family.games[0].variants[1].nasSource?.relative=path
+   try rejects{try family.validate(identity:owner)}
+  }
   try rejects{try document.validate(identity:other)}
   try check(try game.selection(platform:"macos").variant.id==mac.id,"Mac did not prefer native")
   try check(try game.selection(platform:"windows").entry.path=="Play.exe","Windows selected helper or macOS")
@@ -33,6 +46,14 @@ import Foundation
   game.variants=[mac];try rejects{_ = try game.selection(platform:"windows")}
   game.variants=[AccountLibraryVariant(id:win.id,platform:"windows",version:nil,entries:[Candidate(path:"../outside.exe",backend:.wine,engine:"Windows")],saveCompatibilityKey:nil,available:true)]
   try rejects{_ = try game.selection(platform:"windows")}
+  var unsafeWineFallback=win
+  unsafeWineFallback.entries=[
+   Candidate(path:"unsafe./Play.exe",backend:.renpy,engine:"Ren’Py"),
+   Candidate(path:"web.exe",backend:.web,engine:"WebKit"),
+   Candidate(path:"Safe.exe",backend:.renpy,engine:"Ren’Py")
+  ]
+  game.variants=[unsafeWineFallback]
+  try check(try game.selection(platform:"macos").entry.path=="Safe.exe","Mac Wine fallback accepted a Windows-unsafe path or a web backend")
   document.games.append(document.games[0]);try rejects{try document.validate(identity:owner)};document.games.removeLast()
   let fm=FileManager.default,root=fm.temporaryDirectory.appendingPathComponent("AccountLibrary-"+UUID().uuidString)
   try fm.createDirectory(at:root,withIntermediateDirectories:true);defer{try? fm.removeItem(at:root)}

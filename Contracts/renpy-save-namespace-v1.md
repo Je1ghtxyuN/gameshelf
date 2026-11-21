@@ -61,6 +61,8 @@ Use the client/runtime's correct path representation (including Wine paths where
 
 `--savedir` alone does NOT establish isolation for stock RenPy 8.3.7: its secondary game-local/extra locations, token path and multipersistent fallbacks also require the reviewed mitigation. This adapter requires the single-primary-location policy plus the fixed environment. The known original `savelocation.py` SHA `7a84aea6ddccab67c7e004d94cd38092e4a910c15ccb6fabb44aecbde1108427` is refused without the exact approved private replacement SHA `ba48a4c044ec8d557bbc2f42aab441caaf52480ebeb29f2a9208594b6dc09596`. The reviewed replacement removes the block from `    # 2. Game-local savedir.\n` up to `    # Scan the location once.\n`, replacing it with `    # GameShelf account adapter v1: use only the supplied account savedir.\n\n`. The MIT fixture/provenance is under `Fixtures/renpy-8.3.7`.
 
+The Windows adapter also accepts the audited 8.3.2 location module. Its original SHA is `3ed845b5c9d13dcf581a9143b5fc933fc1dfad8f03c93bccc2ef0955adb7e884` and the same single-location edit yields `36e6fe2778ad3d2ca6afe0325eba33661e05e7703b264cf7c0a34dcdf8991365`. The gateway and Windows client enforce the corresponding digest pair. Runtime module validation does not establish compatibility between different editions’ game scripts or saves.
+
 The server patches only the private overlay, only from a pinned original to a digest-verified trusted replacement, and verifies the resulting exported hashes. Source files are untouched. Unknown/tampered private runtime files and associated unreviewed compiled caches are preserved and rejected, never silently overwritten/deleted. `PYTHONDONTWRITEBYTECODE=1` is not permission to skip existing-cache review. No other engine/runtime version is inferred safe from its name.
 
 ## Trusted private review registry
@@ -79,7 +81,7 @@ Shape:
     savePaths:[{path,kind:"directory"}],
     legacySavePaths:[{path,kind:"directory"}],
     fingerprints:[{path,role,sha256}],
-    patches?:[{path,sourceSHA256,targetSHA256,replacementBase64}]
+    patches?:[{path,sourceSHA256,targetSHA256,replacementBase64,compiledCaches?:[{path,sha256}]}]
   }]
 }]}
 ```
@@ -89,6 +91,8 @@ Shape:
 Required fingerprint roles: entry, bootstrap, arguments, main, locations, persistent, tokens, config; native app Info.plist requires an additional metadata proof. Exactly one executable entry proof is required. Include all additional files needed by the actual audited bootstrap/loader/config; this minimum list is not an automatic engine detector or an audit of arbitrary scripts. A profile must uniquely match the edition; no newest/first match is chosen.
 
 Optional private replacement bytes are allowed only for fingerprint-bound, non-entry Python runtime/config files. Source and replacement digests must match; patches are fixed file replacements, not commands or executed server code. Known unsafe stock 8.3.7 location code only accepts the approved patched digest. Server evidenceSHA256 binds the normalized full record; rulesSHA256 binds the adapter, fixed path, format key and reviewed per-variant directory rules. New revisions/evidence require explicit migration/review when an existing namespace is pinned. Production records require an actual source/bootstrap/loader/save-path audit; synthetic API/filesystem tests certify no real game automatically.
+
+A patch can list exact, digest-pinned CPython caches for its module beneath the corresponding `__pycache__`. The gateway masks matching files in the private overlay before export and verifies that the exported patched module has no competing bytecode. Missing caches are allowed so a private view can be reopened. Changed, unlisted, aliased or linked caches stop the export. The read-only game tree retains its original files.
 
 ## Storage, cleanup and legacy data
 
@@ -105,3 +109,5 @@ No HTTP endpoint accepts arbitrary import/source/backup host paths. A trusted ow
 Internal service calls are `reserve_migration(authenticatedAdminSelf, canonicalID, operationID)` and `commit_migration_receipt(authenticatedAdminSelf, canonicalID, operationID, {status:"applied"|"rolled-back",digest:SHA256})`. The barrier operationID is a stable 32-lowercase-hex coordinator UUID; a copy/backup plan's own SHA256 operation digest can be recorded in the receipt digest. These are internal primitives, not an authorization bypass or proof that filesystem import has occurred.
 
 Both session routes check the durable account/canonical barrier before source I/O and again before reserving the play writer. A barrier also blocks identity/profile changes, own removal and entry-preference changes. It survives token logout/expiry, reap and restart; another account is independent. Only after verified import or completed rollback may the trusted coordinator atomically commit its receipt and release the matching barrier in one SQLite transaction. Receipt failures keep the barrier; repeat operations/receipts must match exactly. Source-owner validation, backup/copy/recovery orchestration and adoption of legacy nonempty state remain the coordinator's responsibility; no automatic import is performed by namespace activation or launch.
+
+A reviewed profile may declare `"scope": "edition"` for exactly one published edition. The reviewed namespace, legacy save checks and launch proof apply to that edition. Linked editions retain their existing launch paths. The account and canonical game still govern playtime and the single-writer lease. Profile bindings cannot be reassigned, and the canonical owner migration workflow requires a canonical profile. Profiles without a scope retain canonical behavior and their existing digests.

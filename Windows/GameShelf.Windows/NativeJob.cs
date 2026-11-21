@@ -20,7 +20,7 @@ public sealed class NativeJob:IGameProcess
     {
         cancellation.ThrowIfCancellationRequested();var job=CreateJobObject(IntPtr.Zero,null);if(job==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
         var limits=new ExtendedLimits();limits.Basic.LimitFlags=0x2000;
-        if(!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf<ExtendedLimits>())){CloseHandle(job);throw new Win32Exception(Marshal.GetLastWin32Error());}
+        if(!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf<ExtendedLimits>())){var error=Marshal.GetLastWin32Error();CloseHandle(job);throw new Win32Exception(error);}
         var startup=new StartupInfo{Size=(uint)Marshal.SizeOf<StartupInfo>()};
         var command=new StringBuilder("\""+executable+"\""+(arguments==null?"":" "+arguments));
         IntPtr environment=IntPtr.Zero;ProcessInfo process;
@@ -29,9 +29,9 @@ public sealed class NativeJob:IGameProcess
             if(!CreateProcess(executable,command,IntPtr.Zero,IntPtr.Zero,false,0x4|0x400,environment,directory,ref startup,out process))throw new Win32Exception(Marshal.GetLastWin32Error());
         }catch{CloseHandle(job);throw;}finally{if(environment!=IntPtr.Zero)Marshal.FreeHGlobal(environment);}
         try{
-            if(!AssignProcessToJobObject(job,process.Process)){TerminateProcess(process.Process,1);throw new Win32Exception(Marshal.GetLastWin32Error());}
+            if(!AssignProcessToJobObject(job,process.Process)){var error=Marshal.GetLastWin32Error();TerminateProcess(process.Process,1);throw new Win32Exception(error);}
             cancellation.ThrowIfCancellationRequested();
-            if(ResumeThread(process.Thread)==uint.MaxValue){TerminateJobObject(job,1);throw new Win32Exception(Marshal.GetLastWin32Error());}
+            if(ResumeThread(process.Thread)==uint.MaxValue){var error=Marshal.GetLastWin32Error();TerminateJobObject(job,1);throw new Win32Exception(error);}
             return new(job);
         }catch{CloseHandle(job);throw;}finally{CloseHandle(process.Thread);CloseHandle(process.Process);}
     }

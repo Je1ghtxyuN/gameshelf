@@ -8,10 +8,13 @@ import Foundation
   let game=Game(title:"Phoenixes",folder:"/fake/Phoenixes.app",originalFolder:"/fake/Phoenixes.app",entry:Candidate(path:".",backend:.native,engine:"macOS"))
   let old=home.appendingPathComponent("Library/Application Support/Godot/app_userdata/Phoenixes")
   try fm.createDirectory(at:old.appendingPathComponent("Saves"),withIntermediateDirectories:true);try Data("old progress".utf8).write(to:old.appendingPathComponent("Saves/Saves1.phxsav"))
+  do{try NativeGameSaves.preparePhoenixes(game:game,managedRoot:managed,localRoot:local,home:home,existingOnly:true);fatalError("missing binding was created")}catch{}
+  guard !fm.fileExists(atPath:local.appendingPathComponent("NativeSaveBindings.json").path) else{fatalError("read-only storage resolution wrote a binding")}
   try NativeGameSaves.preparePhoenixes(game:game,managedRoot:managed,localRoot:local,home:home)
   let target=managed.appendingPathComponent("Saves/NativeApps/"+game.id.uuidString)
   guard try fm.destinationOfSymbolicLink(atPath:old.path)==target.path,try String(contentsOf:target.appendingPathComponent("Saves/Saves1.phxsav"),encoding:.utf8)=="old progress" else{fatalError("save link migration")}
   try NativeGameSaves.preparePhoenixes(game:game,managedRoot:managed,localRoot:local,home:home)
+  try NativeGameSaves.preparePhoenixes(game:game,managedRoot:managed,localRoot:local,home:home,existingOnly:true)
   let backupRoot=local.appendingPathComponent("Saves/Backups/"+game.id.uuidString)
   guard (try fm.contentsOfDirectory(at:backupRoot,includingPropertiesForKeys:nil)).count==1 else{fatalError("reuse duplicates backup")}
   var reimport=game;reimport.id=UUID();try NativeGameSaves.preparePhoenixes(game:reimport,managedRoot:managed,localRoot:local,home:home)

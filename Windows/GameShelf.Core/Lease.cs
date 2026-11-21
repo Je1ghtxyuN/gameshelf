@@ -10,19 +10,66 @@ public sealed record SmbShare(string Host,int Port,string? Name,string? Share,st
 }
 public sealed record LeaseGame(string Id);
 [System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
-public sealed record WindowsLaunch(string EntryPath,string Isolation,bool SaveProfileVerified,string? ReviewedProfileID=null,int ProfileRevision=0,string? EntrySHA256=null,string? RulesSHA256=null,string? EvidenceSHA256=null,string? SourceSignature=null,SaveRule[]? SavePaths=null,bool Synthetic=false,string? Adapter=null,string? RelativeSavePath=null);
-public sealed record SaveRule(string Path,string Kind);
-public sealed record LaunchLease(string LeaseID,double ExpiresAt,string ServerID,string UserID,LeaseGame Game,SmbShare Share,WindowsLaunch? WindowsLaunch,SaveNamespace? SaveNamespace=null,RenpyReview? RenpyLaunch=null)
+public sealed record WindowsLaunch(string EntryPath,string Isolation,bool SaveProfileVerified,string? ReviewedProfileID=null,int ProfileRevision=0,string? EntrySHA256=null,string? RulesSHA256=null,string? EvidenceSHA256=null,string? SourceSignature=null,SaveRule[]? SavePaths=null,bool Synthetic=false,string? Adapter=null,string? RelativeSavePath=null)
 {
+    public bool IsPrivateOverlay(LibraryVariant variant, string path) =>
+        ((Isolation=="owner-private-overlay" && variant.NasSource!=null) ||
+         (Isolation=="account-private-overlay" && variant.RequiresAccountWorkspace && variant.FamilyWindowsOverlay)) &&
+        EntryPath==path && !SaveProfileVerified &&
+        ReviewedProfileID==null && ProfileRevision==0 && EntrySHA256==null &&
+        RulesSHA256==null && EvidenceSHA256==null && SourceSignature==null &&
+        SavePaths==null && !Synthetic && Adapter==null && RelativeSavePath==null;
+}
+public sealed record SaveRule(string Path,string Kind);
+public sealed record LaunchLease(string LeaseID,double ExpiresAt,string ServerID,string UserID,LeaseGame Game,SmbShare? Share,WindowsLaunch? WindowsLaunch,SaveNamespace? SaveNamespace=null,RenpyReview? RenpyLaunch=null,string? WorkspaceReceipt=null,MountedWorkspaceLocation? MountedWorkspace=null)
+{
+    public override string ToString() => "Launch lease (credentials and receipt redacted)";
+
+    public void VerifyWorkspace(string root)
+    {
+        if (WorkspaceReceipt == null) return;
+        if (WorkspaceReceipt.Length != 64 || WorkspaceReceipt.Any(c => c is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new InvalidDataException("账号工作区校验信息无效。");
+        var path = RenpyAdapter.CheckedPath(root, ".gameshelf-profile/workspace-receipt-v1", false);
+        var expected = System.Text.Encoding.ASCII.GetBytes(Safety.Id(LeaseID) + "\n" + WorkspaceReceipt + "\n");
+        using var file = File.OpenRead(path);
+        if (file.Length != expected.Length) throw new InvalidDataException("NAS 工作区与当前账号会话不匹配。");
+        var actual = new byte[expected.Length];
+        file.ReadExactly(actual);
+        if (file.ReadByte() != -1 || !actual.AsSpan().SequenceEqual(expected))
+            throw new InvalidDataException("NAS 工作区与当前账号会话不匹配。");
+    }
+
     public void Validate(string server,string user,LibraryVariant variant,LibraryEntry entry,DateTimeOffset now,string? canonicalID=null)
     {
         Safety.Id(LeaseID);
         if(ServerID!=server||UserID!=user||Game.Id!=variant.Id||!double.IsFinite(ExpiresAt)||ExpiresAt<=now.ToUnixTimeSeconds()+5)throw new InvalidDataException("Invalid lease identity/expiry");
-        Share.Validate();
+        if (MountedWorkspace is { } mounted)
+        {
+            if (Share != null || WorkspaceReceipt == null || mounted.Relative != LeaseID)
+                throw new InvalidDataException("账号工作区地址与租约不匹配。");
+            mounted.Validate();
+        }
+        else (Share ?? throw new InvalidDataException("服务器未提供 SMB 会话。")).Validate();
         if(SaveNamespace!=null){RenpyAdapter.ValidateProof(this,variant,entry,canonicalID??throw new InvalidDataException("缺少逻辑游戏标识"));return;}
         if(WindowsLaunch?.Adapter!=null||RenpyLaunch!=null)throw new InvalidDataException("适配器缺少命名空间");
+        if(WindowsLaunch?.IsPrivateOverlay(variant,entry.Path)==true && Safety.NativeEntry(entry.Path,entry.Backend))return;
         if(WindowsLaunch is not {SaveProfileVerified:true,Isolation:"reviewed-relative-saves"}||Safety.Relative(WindowsLaunch.EntryPath)!=Safety.Relative(entry.Path))throw new InvalidDataException("此版本尚无经过验证的 Windows 账号存档隔离配置");
     }
+}
+public sealed record MountedWorkspaceLocation(string Share, string Relative)
+{
+    public void Validate()
+    {
+        if (Share is not { Length: >= 1 and <= 64 } || !char.IsAsciiLetterOrDigit(Share[0]) ||
+            Share.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_' or '.')))
+            throw new InvalidDataException("NAS 共享名称无效。");
+        Safety.Id(Relative);
+    }
+}
+public interface IMountedWindowsView : IReviewedWindowsView
+{
+    Task<string> ConnectMounted(WindowsLeaseContext context, string expectedShare, CancellationToken ct);
 }
 public interface IGameProcess: IAsyncDisposable {Task Wait(CancellationToken ct); Task Stop();}
 public interface IWindowsView {Task<string> Connect(SmbShare share,CancellationToken ct);Task Disconnect();Task<IGameProcess> Start(string root,string relative,CancellationToken ct);}
@@ -36,17 +83,35 @@ public interface ILeaseBoundWindowsView:IWindowsView
     Task BindLease(WindowsLeaseContext context,CancellationToken ct);
     Task RenewLease(string leaseID,double expiresAt,CancellationToken ct);
 }
-public sealed class GameRunner(ApiClient api,AccountStore store,IWindowsView view,AccountGate gate,string deviceID)
+public sealed class GameRunner(ApiClient api,AccountStore store,IWindowsView view,AccountGate gate,string deviceID,bool ownerWindowsOverlay=false,string? mountedWorkspaceShare=null)
 {
     public async Task Run(LibraryGame game,CancellationToken ct)
     {
         var (variant,entry)=Editions.Select(game); gate.Begin(); LaunchLease? lease=null;IGameProcess? process=null;Stopwatch? clock=null;
         Exception? failure=null;
         try{
-            lease=await api.Send<LaunchLease>(HttpMethod.Post,$"/api/library/games/{Safety.Id(game.Id)}/session",new{variantID=variant.Id,deviceID,adapter=RenpyAdapter.Adapter},ct);
+            var request = new Dictionary<string,object> {
+                ["variantID"] = variant.Id, ["deviceID"] = deviceID, ["adapter"] = RenpyAdapter.Adapter
+            };
+            if (variant.FamilyWindowsOverlay || (ownerWindowsOverlay && variant.NasSource != null))
+                request["windowsEntry"] = entry.Path;
+            if (mountedWorkspaceShare != null) request["mountedWorkspace"] = true;
+            lease=await api.Send<LaunchLease>(HttpMethod.Post,$"/api/library/games/{Safety.Id(game.Id)}/session",request,ct);
             lease.Validate(api.ServerID,api.UserID!,variant,entry,DateTimeOffset.UtcNow,game.Id);
-            if(view is ILeaseBoundWindowsView bound)await bound.BindLease(new(game.Id,api.ServerID,api.UserID!,variant,entry,lease),ct);
-            var root=await view.Connect(lease.Share,ct);
+            var context = new WindowsLeaseContext(game.Id,api.ServerID,api.UserID!,variant,entry,lease);
+            string root;
+            if (mountedWorkspaceShare != null)
+            {
+                if (lease.MountedWorkspace?.Share != mountedWorkspaceShare || view is not IMountedWindowsView mounted)
+                    throw new InvalidDataException("服务器返回的 NAS 工作区与请求不匹配。");
+                root = await mounted.ConnectMounted(context,mountedWorkspaceShare,ct);
+            }
+            else
+            {
+                if (lease.Share is not { } share) throw new InvalidDataException("服务器返回了不支持的工作区地址。");
+                if(view is ILeaseBoundWindowsView bound)await bound.BindLease(context,ct);
+                root=await view.Connect(share,ct);
+            }
             lease.Validate(api.ServerID,api.UserID!,variant,entry,DateTimeOffset.UtcNow,game.Id);
             using var launchDeadline=CancellationTokenSource.CreateLinkedTokenSource(ct);launchDeadline.CancelAfter(TimeSpan.FromSeconds(Math.Max(0.01,lease.ExpiresAt-DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()/1000.0-2)));
             var launchToken=launchDeadline.Token;

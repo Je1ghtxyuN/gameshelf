@@ -197,3 +197,39 @@ private enum AccountLibraryMigrationValidation {
   return canonical
  }
 }
+
+/// Device-local launch continuity for a reviewed native edition. The original
+/// record remains the source of launch settings and save identity.
+struct AccountOwnerNativeLaunchBinding: Codable {
+ let owner: AccountLibraryIdentity
+ let localID: UUID
+ let canonicalID: String
+ let variantID: String
+ let entryPath: String
+ let folder: String
+ let originalFolder: String
+
+ func matches(original: Game, game: AccountLibraryGame, selection: AccountLibrarySelection,
+              identity: AccountLibraryIdentity, savedBinding: PersonalLibraryBinding?) -> Bool {
+  owner == identity && savedBinding?.serverID == owner.serverID && savedBinding?.accountID == owner.accountID &&
+   game.id == canonicalID && selection.variant.id == variantID && selection.variant.platform == "macos" &&
+   selection.variant.available && selection.variant.saveCompatibilityKey == nil &&
+   selection.entry.path == entryPath && AccountLibraryGame.safeEntry(selection.entry, platform: "macos") &&
+   original.id == localID && original.shared == nil && original.entry.backend == .native &&
+   original.entry.path == entryPath && original.folder == folder && original.originalFolder == originalFolder &&
+   folder.hasPrefix("/") && originalFolder.hasPrefix("/")
+ }
+
+ static func load(root: URL, identity: AccountLibraryIdentity, savedBinding: PersonalLibraryBinding?) throws -> [Self] {
+  guard savedBinding?.serverID == identity.serverID, savedBinding?.accountID == identity.accountID else { return [] }
+  let file = root.appendingPathComponent("owner-native-launch-bindings.json")
+  guard let bytes = try AccountLibraryDisk.regularData(file, limit: 256 * 1024) else { return [] }
+  let bindings = try JSONDecoder().decode([Self].self, from: bytes)
+  guard bindings.count <= 100, bindings.allSatisfy({ $0.owner == identity }),
+        Set(bindings.map(\.canonicalID)).count == bindings.count,
+        Set(bindings.map(\.localID)).count == bindings.count else {
+   throw LibraryError("原有 macOS 启动绑定无效。")
+  }
+  return bindings
+ }
+}

@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 
 @main struct AccountOwnerTransitionTests {
- static func main()throws {
+ static func main()async throws {
   struct Failure:Error{}
   func check(_ value:Bool,_ text:String)throws{if !value{throw LibraryError(text)}}
   func rejects(_ work:()throws->Void)throws{do{try work()}catch{return};throw LibraryError("Expected transition refusal")}
@@ -155,6 +155,31 @@ import CryptoKit
    guard operation==applyReceipt.operationID else{throw Failure()}
    return try JSONDecoder().decode(AccountOwnerTransitionConfirmation.self,from:Data(contentsOf:ledger))
   })==both,"both accepted aliases must reload with immutable history auth")
+  let acceptedFirst=try JSONDecoder().decode(AccountOwnerTransitionConfirmation.self,from:Data(contentsOf:ledger))
+  let fetched=try await AccountOwnerTransitionGate.loadApprovedAliases(profileRoot:profile,owner:owner,savedBinding:binding,fetchHistoricalReceipt:{operation in
+   await Task.yield()
+   if operation==secondReceipt.operationID{return secondConfirmation}
+   guard operation==applyReceipt.operationID else{throw Failure()}
+   return acceptedFirst
+  })
+  try check(fetched==both,"async historical verification must preserve both existing aliases")
+  do {
+   _ = try await AccountOwnerTransitionGate.loadApprovedAliases(profileRoot:profile,owner:owner,savedBinding:binding,fetchHistoricalReceipt:{operation in
+    if operation==secondReceipt.operationID{return secondConfirmation}
+    return AccountOwnerTransitionConfirmation(payload:acceptedFirst.payload,receiptSHA256:acceptedFirst.receiptSHA256,envelopeSHA256:String(repeating:"0",count:64))
+   })
+   throw LibraryError("Mismatched envelope digest passed")
+  } catch let error as LibraryError where error.localizedDescription == "Accepted adoption history changed." {}
+  let linksURL=profile.appendingPathComponent("game-links.json")
+  let bothBytes=try Data(contentsOf:linksURL)
+  do {
+   _ = try await AccountOwnerTransitionGate.loadApprovedAliases(profileRoot:profile,owner:owner,savedBinding:binding,fetchHistoricalReceipt:{operation in
+    try AccountLibraryDisk.write(Data("{}".utf8),to:linksURL)
+    return operation==secondReceipt.operationID ? secondConfirmation:acceptedFirst
+   })
+   throw LibraryError("Alias snapshot changed across await but passed")
+  } catch let error as LibraryError where error.localizedDescription == "Accepted adoption history changed." {}
+  try AccountLibraryDisk.write(bothBytes,to:linksURL)
   print("PASS AccountOwnerTransition: metadata-only staging, unknown-rules preservation, trusted COMMITTED receipt only, exact identity/profile/fingerprint binding, rollback/forgery/symlink refusal and durable retries")
  }
 }

@@ -9,10 +9,25 @@ public sealed record Connection(string Address,string ServerID,string Pin,bool A
     public static string DataRoot {get;}=ResolveDataRoot();
     static string ResolveDataRoot()
     {
+#if PERSONAL_NAS_PREVIEW
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GameShelf.PersonalPreview");
+#else
         var option=Environment.GetCommandLineArgs().FirstOrDefault(x=>x.StartsWith("--data-dir="));
         if(option==null)return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"GameShelf");
-        var path=Path.GetFullPath(option[11..]);var user=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)+Path.DirectorySeparatorChar;
+        var path=Path.GetFullPath(option[11..]);
+#if UI_ACCEPTANCE
+        var buildRoot=Environment.GetEnvironmentVariable("GAMESHELF_BUILD_ROOT");
+        if(buildRoot is not null && Path.IsPathFullyQualified(buildRoot))
+        {
+            var workspace=Path.GetFullPath(buildRoot);
+            if(path.Equals(Path.Combine(workspace,"ui-local-data"),StringComparison.OrdinalIgnoreCase) ||
+                path.Equals(Path.Combine(workspace,"ui-fixture-data"),StringComparison.OrdinalIgnoreCase))
+                return path;
+        }
+#endif
+        var user=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)+Path.DirectorySeparatorChar;
         if(!path.StartsWith(user,StringComparison.OrdinalIgnoreCase))throw new ArgumentException("数据目录必须位于当前用户目录");return path;
+#endif
     }
     string Resource=>"GameShelf:"+ServerID+":"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(DataRoot)));
     public static string? LastMode(){try{return File.ReadAllText(Path.Combine(DataRoot,"mode.txt")).Trim();}catch{return null;}}

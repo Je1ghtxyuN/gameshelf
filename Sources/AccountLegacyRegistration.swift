@@ -4,7 +4,41 @@ struct AccountLegacyEdition:Decodable {
  let id:String;let canonicalID:String;let candidateID:String;let rootID:String
  let relative:String;let signature:String;let entries:[Candidate];let savePaths:[SharedAdminSaveRule]
 }
-private struct AccountLegacyEditions:Decodable {let editions:[AccountLegacyEdition]}
+struct AccountLegacyEditions:Decodable {let editions:[AccountLegacyEdition]}
+enum AccountLegacyCardLinks {
+ static func make(games: [Game], mappings: [AccountLibraryMigrationRoot], editions: [AccountLegacyEdition],
+                  document: AccountLibraryDocument, identity: AccountLibraryIdentity) -> [UUID: String] {
+  let visible = Dictionary(uniqueKeysWithValues: document.games.map { ($0.id, $0) })
+  let roots = mappings.filter { $0.serverID == identity.serverID }
+  var links: [UUID: String] = [:]
+  for game in games where game.shared == nil {
+   let folder = game.originalFolder.isEmpty ? game.folder : game.originalFolder
+   guard folder.hasPrefix("/") else { continue }
+   let matches = editions.filter { edition in
+    guard let remote = visible[edition.canonicalID],
+          remote.variants.contains(where: { $0.id == edition.id }),
+          AccountLibraryNASSource.validRelativePath(edition.relative) else { return false }
+    let mapped = roots.filter { $0.rootID == edition.rootID && $0.localPath.hasPrefix("/") }
+    guard mapped.count == 1, let root = mapped.first else { return false }
+    let expected = URL(fileURLWithPath: root.localPath).appendingPathComponent(edition.relative).standardizedFileURL
+    guard expected.path == URL(fileURLWithPath: folder).standardizedFileURL.path else { return false }
+    return edition.entries.contains { entry in
+     guard entry.path == game.entry.path else { return false }
+     if entry.backend == game.entry.backend { return true }
+     // A packaged MZ game may expose its WebKit and Windows launchers as separate editions.
+     return game.entry.backend == .rpgmz && entry.backend == .wine &&
+      remote.variants.contains { variant in
+       variant.platform == "web" && variant.entries.contains { $0.backend == .rpgmz && $0.path == "index.html" }
+      }
+    }
+   }
+   let ids = Set(matches.map(\.canonicalID))
+   if ids.count == 1, let canonical = ids.first { links[game.id] = canonical }
+  }
+  return links
+ }
+}
+
 private struct AccountLegacyLink:Decodable {let canonicalID:String;let variantIDs:[String]}
 private struct AccountLegacyAdded:Decodable {let games:[AccountLibraryGame]}
 struct AccountLegacyRegistrationResult {

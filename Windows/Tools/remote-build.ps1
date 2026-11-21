@@ -1,9 +1,5 @@
 $ErrorActionPreference='Stop'
-$dev=Join-Path $env:USERPROFILE 'GameShelfDev'
-$env:DOTNET_ROOT=Join-Path $dev 'dotnet'
-$env:PATH="$env:DOTNET_ROOT;$env:PATH"
-$env:NUGET_PACKAGES=Join-Path $dev 'packages'
-$env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
+. (Join-Path $PSScriptRoot 'build-environment.ps1')
 $ProgressPreference='SilentlyContinue'
 
 Set-Location (Join-Path $dev 'src/Windows')

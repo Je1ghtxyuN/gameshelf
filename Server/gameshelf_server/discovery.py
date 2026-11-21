@@ -1,6 +1,7 @@
 """Small read-only probes; complete-directory grouping, never executable import."""
 import hashlib
 import os
+import plistlib
 from pathlib import Path
 import re
 import stat
@@ -133,6 +134,21 @@ def order(name):
     natural=tuple((1,int(p)) if p.isdigit() else (0,p) for p in re.split(r'(\d+)',normalized))
     return (not bool(CHINESE.search(normalized)),natural,name)
 
+def has_native_app_launcher(app):
+    """Check launcher metadata only; never execute a bundle during discovery."""
+    info=app/'Contents/Info.plist'
+    try:
+        if info.is_symlink() or info.stat().st_size>1024*1024:
+            return False
+        name=plistlib.loads(info.read_bytes()).get('CFBundleExecutable')
+        if not isinstance(name,str) or not name or name in ('.','..') or '/' in name or '\\' in name:
+            return False
+        magic=header(app,'Contents/MacOS/'+name,4)
+        return magic in (b'\xcf\xfa\xed\xfe',b'\xce\xfa\xed\xfe',b'\xfe\xed\xfa\xcf',b'\xfe\xed\xfa\xce',b'\xca\xfe\xba\xbe',b'\xbe\xba\xfe\xca',b'\xca\xfe\xba\xbf',b'\xbf\xba\xfe\xca') or magic.startswith(b'#!')
+    except (OSError,ValueError,TypeError,AttributeError,plistlib.InvalidFileException):
+        return False
+
+
 def discover(directory,dirs,files):
     names={n.lower() for n in files if not (directory/n).is_symlink()}
     renpy=(directory/'renpy').is_dir() and not (directory/'renpy').is_symlink()
@@ -168,6 +184,9 @@ def discover(directory,dirs,files):
         if name.lower().endswith('.app') and not app.is_symlink():
             known=('Contents/Resources/autorun/renpy','Contents/Resources/renpy','Contents/Resources/app/renpy')
             app_engine='renpy' if any((app/p).is_dir() for p in known) else 'unknown'
+            # PC Ren'Py bundles may carry only icon/lib resources in a .app stub.
+            if renpy and app_engine=='unknown' and not has_native_app_launcher(app):
+                continue
             apps.append(dict(path=name,backend='native',engine=app_engine))
     # A raw NW.js package is not automatically a safe web backend.
     if not entries and not apps and 'index.html' in names and not names.intersection({'package.json','nw.dll'}):

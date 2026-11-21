@@ -275,3 +275,133 @@ class _GameShelfSMBReadOnlyRPA(object):
   return Preparation(profile:profileID,changed:!written.isEmpty,patchedPaths:paths)
  }
 }
+
+/// Optional, operator-generated index for an immutable NAS edition. Only the
+/// staged local loader changes. The indexed assets remain on the original share.
+struct NativeRenpyMediaIndex {
+ private struct Manifest: Decodable {
+  let schemaVersion: Int
+  let source: String
+  let infoSHA256: String
+  let versionSHA256: String
+  let media: [String: [String]]
+ }
+ private static let loaderSHA256 = "ca27515e7735d7679ed34ac4fdd6424623e886d56244ce4ca384ae62fed43cae"
+ private static let directories: Set<String> = ["audio", "images", "fonts", "track"]
+ private static let executableExtensions: Set<String> = ["py", "pyc", "pyo", "rpy", "rpyc", "rpym", "rpymc", "rpa", "so", "dylib"]
+ private let media: [String: [String]]
+ let fingerprint: String
+
+ private static func sha(_ data: Data) -> String {
+  SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+ }
+
+ static func validate(_ media: [String: [String]]) throws -> [String: [String]] {
+  guard !media.isEmpty, Set(media.keys).isSubset(of: directories) else {
+   throw LibraryError("媒体索引包含不受支持的目录。")
+  }
+  var names = Set<String>()
+  for (directory, files) in media {
+   for path in files {
+    let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+    let ext = (path as NSString).pathExtension.lowercased()
+    guard path.utf8.count <= 4096, parts.count >= 2, parts[0] == directory,
+          parts.allSatisfy({ !$0.isEmpty && !$0.hasPrefix(".") }),
+          !path.contains("\\"), !path.contains(":"),
+          !path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+          !executableExtensions.contains(ext),
+          names.insert(path.precomposedStringWithCanonicalMapping.lowercased()).inserted,
+          names.count <= 100_000 else {
+     throw LibraryError("媒体索引包含无效、重复或不可索引的文件。")
+    }
+   }
+  }
+  return media
+ }
+
+ static func load(root: URL, gameID: UUID, source: URL, info: Data) throws -> Self? {
+  let folder = root.appendingPathComponent("NativeMediaIndexes", isDirectory: true)
+  let url = folder.appendingPathComponent(gameID.uuidString + ".json")
+  let fm = FileManager.default
+  let attrs: [FileAttributeKey: Any]
+  do { attrs = try fm.attributesOfItem(atPath: url.path) }
+  catch let error as NSError where error.domain == NSCocoaErrorDomain &&
+        [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) { return nil }
+  guard (try fm.attributesOfItem(atPath: folder.path)[.type] as? FileAttributeType) == .typeDirectory,
+        attrs[.type] as? FileAttributeType == .typeRegular,
+        let size = attrs[.size] as? NSNumber, size.intValue <= 8 * 1024 * 1024 else {
+   throw LibraryError("媒体索引文件无效。")
+  }
+  let bytes = try Data(contentsOf: url)
+  guard bytes.count == size.intValue else { throw LibraryError("媒体索引在读取时发生变化。") }
+  let manifest = try JSONDecoder().decode(Manifest.self, from: bytes)
+  let version = source.appendingPathComponent("Contents/Resources/autorun/game/script_version.txt")
+  guard manifest.schemaVersion == 1, manifest.source == source.path,
+        manifest.infoSHA256 == sha(info),
+        let marker = try? FileHandle(forReadingFrom: version) else {
+   throw LibraryError("媒体索引与当前游戏发行版不匹配，请刷新索引。")
+  }
+  defer { try? marker.close() }
+  guard let data = try marker.read(upToCount: 1025), data.count <= 1024,
+        manifest.versionSHA256 == sha(data) else {
+   throw LibraryError("游戏版本已变更，请刷新媒体索引。")
+  }
+  return Self(media: try validate(manifest.media), fingerprint: "renpy-media-index-v1/" + sha(bytes))
+ }
+
+ func prepare(stage: URL) throws {
+  let base = stage.appendingPathComponent("Contents/Resources/autorun")
+  let loader = base.appendingPathComponent("renpy/loader.py")
+  let index = base.appendingPathComponent("gameshelf-media-index.json")
+  guard loader.standardizedFileURL.path == loader.resolvingSymlinksInPath().path,
+        !FileManager.default.fileExists(atPath: index.path),
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: index.path)) == nil else {
+   throw LibraryError("媒体索引缓存路径无效。")
+  }
+  let data = try Data(contentsOf: loader)
+  guard Self.sha(data) == Self.loaderSHA256, var text = String(data: data, encoding: .utf8) else {
+   throw LibraryError("此 Ren’Py 加载器版本尚未核验媒体索引适配。")
+  }
+  let changes = [
+   ("def walkdir(path, elide=None):", Self.pythonIndex + "\n\ndef walkdir(path, elide=None):"),
+   ("        if de.is_dir():\n            yield from walkdir(de.path, elide)", Self.pythonWalk),
+   ("        fn = os.path.join(renpy.config.basedir, d, path)\n\n        if os.path.isfile(fn):", Self.pythonLookup)
+  ]
+  for (needle, replacement) in changes {
+   guard text.components(separatedBy: needle).count == 2 else {
+    throw LibraryError("媒体索引的加载器模板不匹配。")
+   }
+   text = text.replacingOccurrences(of: needle, with: replacement)
+  }
+  try JSONEncoder().encode(media).write(to: index, options: .atomic)
+  try Data(text.utf8).write(to: loader, options: .atomic)
+ }
+
+ private static let pythonIndex = #"""
+ import json as _gs_json
+
+ def _gs_load_media_index():
+     filename = os.path.join(os.path.dirname(__file__), "..", "gameshelf-media-index.json")
+     with open(filename, encoding="utf-8") as handle:
+         return _gs_json.load(handle)
+
+ _gs_media_index = _gs_load_media_index()
+ _gs_media_files = frozenset(path for paths in _gs_media_index.values() for path in paths)
+ _gs_game_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "game"))
+ """#
+ private static let pythonWalk = #"""
+         if os.path.normpath(path) == _gs_game_root and de.name in _gs_media_index:
+             yield from _gs_media_index[de.name]
+         elif de.is_dir():
+             yield from walkdir(de.path, elide)
+ """#
+ private static let pythonLookup = #"""
+         root = os.path.normpath(os.path.join(renpy.config.basedir, d))
+         fn = os.path.join(root, path)
+         if root == _gs_game_root and path.partition("/")[0] in _gs_media_index:
+             if path in _gs_media_files:
+                 return fn
+             continue
+         if os.path.isfile(fn):
+ """#
+}

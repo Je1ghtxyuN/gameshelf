@@ -3,22 +3,30 @@ import CryptoKit
 
 /// Explicitly verified Godot project. Other projects keep their own data paths.
 enum NativeGameSaves {
- static func storageID(game:Game,localRoot:URL)throws->UUID {
+ static func storageID(game:Game,localRoot:URL,existingOnly:Bool=false)throws->UUID {
   if let shared=game.shared{return shared.gameIdentity}
   let source=URL(fileURLWithPath:game.originalFolder).appendingPathComponent(game.entry.path).standardizedFileURL.resolvingSymlinksInPath().path
+  if existingOnly {
+   let bytes = try Data(contentsOf: localRoot.appendingPathComponent("NativeSaveBindings.json"))
+   guard let id = try JSONDecoder().decode([String:UUID].self, from: bytes)[source] else {
+    throw LibraryError("找不到原有 macOS 存档绑定。")
+   }
+   return id
+  }
   return try WebSaveBindings(root:localRoot,fileName:"NativeSaveBindings.json").resolve(source:source,initial:game.id)
  }
 
- static func preparePhoenixes(game:Game,managedRoot:URL,localRoot:URL,home:URL=FileManager.default.homeDirectoryForCurrentUser)throws {
+ static func preparePhoenixes(game:Game,managedRoot:URL,localRoot:URL,home:URL=FileManager.default.homeDirectoryForCurrentUser,existingOnly:Bool=false)throws {
   let fm=FileManager.default
   guard fm.fileExists(atPath:managedRoot.path) else{throw LibraryError("NAS 存档目录不可用，请连接 NAS 后启动。")}
-  let storageID=try storageID(game:game,localRoot:localRoot)
+  let storageID=try storageID(game:game,localRoot:localRoot,existingOnly:existingOnly)
   let target=managedRoot.appendingPathComponent("Saves/NativeApps/"+storageID.uuidString).standardizedFileURL
   let current=home.appendingPathComponent("Library/Application Support/Godot/app_userdata/Phoenixes").standardizedFileURL
   if let link=try? fm.destinationOfSymbolicLink(atPath:current.path){
    guard URL(fileURLWithPath:link,relativeTo:current.deletingLastPathComponent()).standardizedFileURL.path==target.path else{throw LibraryError("Phoenixes 用户目录已关联其他位置，已保留，未自动替换。")}
-   try fm.createDirectory(at:target,withIntermediateDirectories:true);return
+   if !existingOnly { try fm.createDirectory(at:target,withIntermediateDirectories:true) };return
   }
+  guard !existingOnly else{throw LibraryError("找不到原有 Phoenixes 存档链接，未切换存档位置。")}
   // Do not write through a substituted ancestor into another game's directory.
   var parent=current.deletingLastPathComponent()
   while parent.path != home.standardizedFileURL.path && parent.path != "/" {

@@ -283,6 +283,16 @@ class PersistenceTests(unittest.TestCase):
 class ConfigurationTests(unittest.TestCase):
     setUp=SetupTests.setUp
     app=SetupTests.app
+    def test_windows_standard_port_can_use_a_configured_private_overlay_address(self):
+        from gameshelf_server.__main__ import Settings
+        env = dict(GAMESHELF_SOURCE_ROOTS='["/games"]', GAMESHELF_SMB_HOST='games.example.invalid')
+        self.assertIsNone(Settings.from_env(env).windows_smb_host)
+        for address in ('192.168.1.20', '100.64.12.34'):
+            self.assertEqual(Settings.from_env(dict(env, GAMESHELF_WINDOWS_SMB_HOST=address)).windows_smb_host, address)
+        for address in ('100.128.0.1', '8.8.8.8', '100.64.12.34:445'):
+            with self.assertRaises(ValueError):
+                Settings.from_env(dict(env, GAMESHELF_WINDOWS_SMB_HOST=address))
+
     def test_removing_public_address_disables_previous_setup_capability(self):
         self.app(); token=json.loads((self.s.state/'administrator-setup.json').read_text())['setupToken']
         unconfigured=Application(self.s)

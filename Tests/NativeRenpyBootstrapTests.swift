@@ -912,6 +912,20 @@ if __name__=='__main__':unittest.main(verbosity=2)
   print("PASS NativeCache integration: real Mach-O stub, adapted sealed Python import/errorfile, strict signature verification, identical inode/seal/receipt on second prepare, original source unchanged")
  }
  static func main()throws {
+  let media = ["images": ["images/Title.webp"], "audio": ["audio/title.ogg"]]
+  try check(try NativeRenpyMediaIndex.validate(media) == media, "valid nested media filenames")
+  for bad in [
+   ["images": ["images/../escape.webp"]],
+   ["images": ["audio/track.ogg"]],
+   ["images": ["images/Title.webp", "images/title.webp"]],
+   ["game": ["game/main.rpy"]],
+   ["images": ["images/main.rpy"]],
+   ["images": ["images/a\\b.webp"]]
+  ] {
+   do { _ = try NativeRenpyMediaIndex.validate(bad); throw Failure(description:"invalid media index was accepted") }
+   catch is LibraryError {}
+  }
+
   let root=URL(fileURLWithPath:fm.currentDirectoryPath).appendingPathComponent("build/validation/renpy-bootstrap/run-"+UUID().uuidString)
   try fm.createDirectory(at:root,withIntermediateDirectories:true)
   let app=try fixture(root,"normal"),logs=root.appendingPathComponent("External 日志")

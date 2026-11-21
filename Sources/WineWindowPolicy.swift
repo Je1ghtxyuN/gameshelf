@@ -14,10 +14,10 @@ enum WineWindowPolicy {
 extension Wrapper {
  /// Default for every Wine game, including libraries with legacy desktop sizes.
  /// Keep one coordinate system: no explorer desktop and no post-launch mover.
- static func gameWindowLaunchSpec(game:Game,runtime:URL)throws->LaunchSpec {
+ static func gameWindowLaunchSpec(game:Game,runtime:URL,directNAS:Bool=false)throws->LaunchSpec {
   var directGame=game
   directGame.windowSize=nil
-  var spec=try launchSpec(game:directGame,runtime:runtime)
+  var spec=try launchSpec(game:directGame,runtime:runtime,directNAS:directNAS)
   if game.entry.backend == .wine,game.entry.engine == "Unity",game.entry.path.lowercased()=="pure-onyx.exe" {
    spec.arguments += ["-screen-fullscreen",game.wineFullscreen == true ? "1":"0","-screen-width","1280","-screen-height","720"]
   }

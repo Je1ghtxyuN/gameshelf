@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum SharedProfile {
  private static func userFolder(_ name:String,under profile:URL)->URL {
@@ -14,7 +15,9 @@ enum SharedProfile {
  }
  static func networkProfile(game:Game)throws->URL {
   guard game.shared != nil else{throw LibraryError("这个游戏不属于共享账号。")}
-  let base=URL(fileURLWithPath:game.folder).standardizedFileURL
+  // Keep the verified mount spelling. Foundation can turn /private/tmp
+  // into /tmp, which the WebKit store correctly rejects as a symlink.
+  let base=URL(fileURLWithPath:game.folder,isDirectory:true)
   let profile=base.appendingPathComponent(".gameshelf-profile")
   let fm=FileManager.default
   if (try? fm.destinationOfSymbolicLink(atPath:profile.path)) != nil{throw LibraryError("个人存档目录不能是外部链接。")}
@@ -22,13 +25,51 @@ enum SharedProfile {
   guard profile.resolvingSymlinksInPath().path.hasPrefix(base.resolvingSymlinksInPath().path+"/") else{throw LibraryError("个人存档目录超出了游戏共享。")}
   return profile
  }
- static func prepareWine(game:Game,runtime:URL,removeSeedRegistry:Bool=true)throws {
+ static func wineProfile(game:Game,runtime:URL,directNAS:Bool)throws->URL {
+  if !directNAS {return try networkProfile(game:game)}
+  let support=runtime.appendingPathComponent("Contents/SharedSupport",isDirectory:true)
+  let profile=support.appendingPathComponent("DirectNASProfile",isDirectory:true)
+  let fm=FileManager.default
+  guard support.resolvingSymlinksInPath().path==runtime.resolvingSymlinksInPath().path+"/Contents/SharedSupport" else{
+   throw LibraryError("本机 Wine 运行目录包含外部链接。")
+  }
+  for directory in [profile,profile.appendingPathComponent("UnixHome"),profile.appendingPathComponent("WindowsUsers")] {
+   if (try? fm.destinationOfSymbolicLink(atPath:directory.path)) != nil ||
+      (fm.fileExists(atPath:directory.path) && directory.resolvingSymlinksInPath().path != support.resolvingSymlinksInPath().path+String(directory.path.dropFirst(support.path.count))) {
+    throw LibraryError("本机 Wine 账号目录包含外部链接。")
+   }
+  }
+  return profile
+ }
+ private static func mountedUserRoot(runtime:URL,workspaceUsers:URL)throws->URL {
+  let fm = FileManager.default
+  let support = runtime.appendingPathComponent("Contents/SharedSupport",isDirectory:true)
+  guard support.resolvingSymlinksInPath().path == runtime.resolvingSymlinksInPath().path + "/Contents/SharedSupport" else {
+   throw LibraryError("Wine 运行目录包含外部链接。")
+  }
+  try fm.createDirectory(at:workspaceUsers,withIntermediateDirectories:true)
+  guard workspaceUsers.resolvingSymlinksInPath().path == workspaceUsers.deletingLastPathComponent().resolvingSymlinksInPath().path + "/WindowsUsers" else {
+   throw LibraryError("Wine 账号存档目录包含外部链接。")
+  }
+  let alias = support.appendingPathComponent("MountedWorkspaceUsers")
+  if (try? fm.destinationOfSymbolicLink(atPath:alias.path)) == workspaceUsers.path { return alias }
+  if fm.fileExists(atPath:alias.path), (try? fm.destinationOfSymbolicLink(atPath:alias.path)) == nil {
+   throw LibraryError("Wine 账号工作区链接位置已被占用。")
+  }
+  let stage = support.appendingPathComponent(".workspace-users-"+UUID().uuidString)
+  defer { try? fm.removeItem(at:stage) }
+  try fm.createSymbolicLink(atPath:stage.path,withDestinationPath:workspaceUsers.path)
+  guard Darwin.rename(stage.path,alias.path) == 0 else { throw LibraryError("无法切换 Wine 账号工作区。") }
+  return alias
+ }
+ static func prepareWine(game:Game,runtime:URL,removeSeedRegistry:Bool=true,directNAS:Bool=false,mountedWorkspace:Bool=false)throws {
   guard let ref=game.shared else{return}
   let fm=FileManager.default
   let prefix=runtime.appendingPathComponent("Contents/SharedSupport/prefix")
   let marker=prefix.appendingPathComponent("gameshelf-account.json")
   let users=prefix.appendingPathComponent("drive_c/users")
-  let profile=try networkProfile(game:game).appendingPathComponent("WindowsUsers")
+  let workspaceUsers=try wineProfile(game:game,runtime:runtime,directNAS:directNAS).appendingPathComponent("WindowsUsers")
+  let profile=mountedWorkspace ? try mountedUserRoot(runtime:runtime,workspaceUsers:workspaceUsers) : workspaceUsers
   let identity=ref.storageKey
   if fm.fileExists(atPath:marker.path) {
    guard let record=try JSONSerialization.jsonObject(with:Data(contentsOf:marker)) as? [String:Any],record["identity"] as? String==identity,record["schema"] as? String=="3",

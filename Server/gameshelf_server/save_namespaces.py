@@ -49,6 +49,9 @@ class SaveNamespaces:
         pid=data['reviewedProfileID']
         if not isinstance(pid,str) or pid not in self.save_profiles: raise APIError(404,'Trusted reviewed RenPy profile not found')
         profile=self.save_profiles[pid]
+        edition_only=profile.get('scope')=='edition'
+        if edition_only and len(ids)!=1:
+            raise APIError(400,'Edition save scope requires exactly one published edition')
         if data['compatibilityKey']!=profile['compatibilityKey']: raise APIError(409,'Compatibility key must match reviewed save format')
         self._profile_edit_idle(canonical); plans=[]
         for edition in ids:
@@ -75,6 +78,11 @@ class SaveNamespaces:
         if existing and tuple(existing)!=values: raise APIError(409,'Namespace identity/review cannot change without explicit migration')
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            if edition_only and self.db.execute(
+                'SELECT 1 FROM save_namespace_variants WHERE canonical_id=? AND variant_id!=?',
+                (canonical,ids[0]),
+            ).fetchone():
+                raise APIError(409,'Edition namespace cannot be reassigned without migration')
             self.db.execute('INSERT OR IGNORE INTO canonical_save_namespaces VALUES (?,?,?,?,?,?)',values)
             for game,variant in plans:
                 old=self.db.execute('SELECT * FROM save_namespace_variants WHERE variant_id=?',(game['id'],)).fetchone()
@@ -91,18 +99,24 @@ class SaveNamespaces:
         profile=self.save_profiles.get(stored['profile_id'])
         if not profile or profile['evidenceSHA256']!=stored['evidence_sha256'] or profile['rulesSHA256']!=stored['rules_sha256'] or profile['revision']!=stored['revision']:
             raise APIError(409,'Trusted RenPy namespace review is missing or stale')
-        binding=self.db.execute('SELECT * FROM save_namespace_variants WHERE variant_id=? AND canonical_id=?',(game['id'],canonical)).fetchone()
-        if not binding or binding['source_signature']!=game['signature']: raise APIError(409,'Edition lacks current reviewed namespace binding; isolated fallback forbidden')
+        edition_only=profile.get('scope')=='edition'
+        binding=self.db.execute('SELECT * FROM save_namespace_variants WHERE variant_id=?',(game['id'],)).fetchone()
+        if not binding and edition_only:
+            return None
+        if not binding or binding['canonical_id']!=canonical or binding['source_signature']!=game['signature']:
+            raise APIError(409,'Edition lacks current reviewed namespace binding; isolated fallback forbidden')
         variant=next((v for v in profile['variants'] if v['id']==binding['profile_variant_id']),None)
         if not variant: raise APIError(409,'Namespace adapter review is missing')
         if not any(e['path']==variant['entryPath'] and e['backend']==variant['entryBackend'] for e in json.loads(game['entries'])):
             raise APIError(409,'Reviewed RenPy entry is no longer published')
         key='/'.join((self.server_id,user['id'],canonical,hashlib.sha256(profile['compatibilityKey'].encode()).hexdigest()))
-        legacy=[]
-        for row in self.db.execute('SELECT variant_id FROM library_variants WHERE canonical_id=? ORDER BY variant_id',(canonical,)):
-            bound=self.db.execute('SELECT profile_variant_id FROM save_namespace_variants WHERE variant_id=? AND canonical_id=?',(row[0],canonical)).fetchone()
-            old=next((v for v in profile['variants'] if bound and v['id']==bound[0]),None)
-            legacy.append(dict(id=row[0],unknown=old is None,legacySavePaths=copy.deepcopy(old['legacySavePaths']) if old else []))
+        legacy=[dict(id=game['id'],unknown=False,legacySavePaths=copy.deepcopy(variant['legacySavePaths']))]
+        if not edition_only:
+            legacy=[]
+            for row in self.db.execute('SELECT variant_id FROM library_variants WHERE canonical_id=? ORDER BY variant_id',(canonical,)):
+                bound=self.db.execute('SELECT profile_variant_id FROM save_namespace_variants WHERE variant_id=? AND canonical_id=?',(row[0],canonical)).fetchone()
+                old=next((v for v in profile['variants'] if bound and v['id']==bound[0]),None)
+                legacy.append(dict(id=row[0],unknown=old is None,legacySavePaths=copy.deepcopy(old['legacySavePaths']) if old else []))
         return dict(key=key,relativePath=RELATIVE,adapter=ADAPTER,reviewedProfileID=profile['id'],revision=profile['revision'],
             rulesSHA256=profile['rulesSHA256'],evidenceSHA256=profile['evidenceSHA256'],compatibilityKey=profile['compatibilityKey'],
             serverID=self.server_id,userID=user['id'],canonicalID=canonical,variant=copy.deepcopy(variant),legacyVariants=legacy,synthetic=profile['synthetic'])

@@ -1,7 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$dev = Join-Path $env:USERPROFILE 'GameShelfDev'
-New-Item -ItemType Directory -Force $dev | Out-Null
-$env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
+. (Join-Path $PSScriptRoot 'build-environment.ps1')
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $installer = Join-Path $dev 'dotnet-install.ps1'
 Invoke-WebRequest 'https://dot.net/v1/dotnet-install.ps1' -UseBasicParsing -OutFile $installer

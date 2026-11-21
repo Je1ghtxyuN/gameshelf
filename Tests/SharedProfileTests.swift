@@ -10,6 +10,12 @@ import Foundation
   let source=SharedGameReference(connectionID:UUID(),serverID:"server",accountID:"alice",gameID:"story")
   let mounted=root.appendingPathComponent("network");try fm.createDirectory(at:mounted,withIntermediateDirectories:true)
   let game=Game(title:"Story",folder:mounted.path,originalFolder:"remote",entry:Candidate(path:"Game.exe",backend:.wine,engine:"Windows"),shared:source)
+  let privateMount=URL(fileURLWithPath:"/private/tmp/SharedProfile-"+UUID().uuidString)
+  try fm.createDirectory(at:privateMount,withIntermediateDirectories:false)
+  defer{try? fm.removeItem(at:privateMount)}
+  var privateGame=game;privateGame.folder=privateMount.path
+  let privateProfile=try SharedProfile.networkProfile(game:privateGame)
+  try check(privateProfile.path==privateMount.path+"/.gameshelf-profile","verified mount path was replaced with a system symlink alias")
   let runtime=root.appendingPathComponent("runtime.app"),prefix=runtime.appendingPathComponent("Contents/SharedSupport/prefix")
   try fm.createDirectory(at:prefix.appendingPathComponent("drive_c/users/owner"),withIntermediateDirectories:true)
   try fm.createSymbolicLink(at:prefix.appendingPathComponent("drive_c/users/owner/Documents"),withDestinationURL:original)

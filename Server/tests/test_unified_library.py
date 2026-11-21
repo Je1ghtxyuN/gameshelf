@@ -31,11 +31,109 @@ class UnifiedLibraryTests(unittest.TestCase):
         self.assertEqual(lib['games'][0]['id'],g)
         variant=lib['games'][0]['variants'][0]
         self.assertEqual((variant['id'],variant['platform']),(g,'windows'))
+        self.assertNotIn('nasSource',variant)
+        self.assertEqual(self.library(self.at)['games'],[])
+        owner=self.s.authenticate(self.at)
+        self.s.grant(owner['id'],g,True)
+        owner_variant=self.library(self.at)['games'][0]['variants'][0]
+        relative=self.s.db.execute('SELECT relative FROM games WHERE id=?',(g,)).fetchone()[0]
+        self.assertEqual(owner_variant['nasSource'],dict(rootID=self.root['id'],relative=relative))
         self.assertEqual(self.library(self.bt)['games'],[])
         roots=self.request('GET','/api/library/roots')['roots']
         self.assertEqual(roots,[dict(id=self.root['id'],title='Games')])
         self.assertNotIn(str(self.source),json.dumps(lib))
         self.denied(lambda:self.app.dispatch('GET','/api/library',{},''),401)
+    def test_family_direct_nas_exposes_only_granted_relative_sources(self):
+        game = self.game()
+        self.assertNotIn('nasSource', self.library()['games'][0]['variants'][0])
+        self.s.direct_nas = True
+        library = self.library()
+        self.assertTrue(library['directNas'])
+        source = library['games'][0]['variants'][0]['nasSource']
+        self.assertEqual(source, dict(rootID=self.root['id'], relative='Novel'))
+        self.assertNotIn(str(self.source), json.dumps(library))
+        self.assertEqual(self.library(self.bt)['games'], [])
+        self.s.grant(self.a['id'], game, False)
+        self.assertEqual(self.library()['games'], [])
+
+    def test_family_nas_does_not_offer_raw_source_with_detected_saves(self):
+        source_save = self.source/'Novel'/'slot1.sav'
+        source_save.write_bytes(b'private source progress')
+        self.s.direct_nas = True
+        game = self.game()
+        variant = self.library()['games'][0]['variants'][0]
+        self.assertEqual(variant['id'], game)
+        self.assertTrue(variant['requiresAccountWorkspace'])
+        self.assertNotIn('nasSource', variant)
+        self.assertEqual(source_save.read_bytes(), b'private source progress')
+
+    def test_family_scan_add_is_visible_to_current_and_future_accounts(self):
+        self.s.direct_nas = True
+        private_game = self.game()
+        self.assertEqual(self.library(self.bt)['games'], [])
+        candidate = self.s.candidates()[0]['id']
+        owner = self.s.authenticate(self.at)
+        result = self.request('POST', '/api/admin/library/add',
+                              dict(candidateIDs=[candidate],userID=owner['id']), self.at)
+        self.assertEqual(result['games'][0]['id'], private_game)
+        self.assertEqual([game['id'] for game in self.library(self.bt)['games']], [private_game])
+        self.s.create_user('later', 'later fixture password')
+        later = self.s.login('later', 'later fixture password')['token']
+        self.assertEqual([game['id'] for game in self.library(later)['games']], [private_game])
+        route = f'/api/library/games/{private_game}'
+        self.request('POST', route+'/playtime',
+                     dict(eventID=str(uuid.uuid4()),deviceID='pc',elapsedSeconds=12,endedAt=1000), self.bt)
+        self.assertEqual(self.library(self.bt)['games'][0]['playtimeSeconds'], 12)
+        self.assertEqual(self.library(later)['games'][0]['playtimeSeconds'], 0)
+        self.denied(lambda: self.request('DELETE', route, token=self.bt), 403)
+        self.request('DELETE', route, token=self.at)
+        self.assertEqual(self.library(self.bt)['games'], [])
+        self.assertEqual([game['id'] for game in self.library()['games']], [private_game])
+
+    def test_generic_windows_launch_is_owner_only_and_requires_a_published_entry(self):
+        g = self.game()
+        owner = self.s.authenticate(self.at)
+        self.s.grant(owner['id'], g, True)
+        path = f'/api/library/games/{g}/session'
+        request = dict(variantID=g, deviceID='windows', windowsEntry='Game.exe')
+        self.denied(lambda: self.request('POST', path, request), 403)
+        self.denied(lambda: self.request('POST', path, dict(request, windowsEntry='uninstall.exe'), self.at), 409)
+        with patch.object(self.driver, 'prepare_generic_windows_entry', create=True) as prepare:
+            lease = self.request('POST', path, request, self.at)
+            self.assertEqual(lease['windowsLaunch'], dict(entryPath='Game.exe',
+                isolation='owner-private-overlay', saveProfileVerified=False))
+            self.assertEqual(prepare.call_args.args[1], 'Game.exe')
+
+    def test_family_windows_workspace_is_available_to_library_members_with_save_rules(self):
+        self.s.direct_nas = True
+        (self.source/'Novel'/'slot1.sav').write_bytes(b'private source progress')
+        game = self.game()
+        route = f'/api/library/games/{game}/session'
+        request = dict(variantID=game, deviceID='windows', windowsEntry='Game.exe')
+        with patch.object(self.driver, 'prepare_generic_windows_entry', create=True) as prepare:
+            self.assertTrue(self.library()['games'][0]['variants'][0]['familyWindowsOverlay'])
+            self.denied(lambda: self.request('POST', route, request, self.bt), 403)
+            self.denied(lambda: self.request('POST', route, dict(request, windowsEntry='uninstall.exe')), 409)
+            lease = self.request('POST', route, request)
+            self.assertEqual(lease['userID'], self.a['id'])
+            self.assertEqual(lease['windowsLaunch'], dict(entryPath='Game.exe',
+                isolation='account-private-overlay', saveProfileVerified=False))
+            self.assertEqual(prepare.call_args.args[1], 'Game.exe')
+            self.denied(lambda: self.request('POST', route, request), 409)
+
+    def test_family_windows_first_run_uses_workspace_even_without_detected_saves(self):
+        self.s.direct_nas = True
+        game = self.game()
+        route = f'/api/library/games/{game}/session'
+        request = dict(variantID=game, deviceID='first-launch', windowsEntry='Game.exe')
+        with patch.object(self.driver, 'prepare_generic_windows_entry', create=True):
+            variant = self.library()['games'][0]['variants'][0]
+            self.assertTrue(variant['requiresAccountWorkspace'])
+            self.assertTrue(variant['familyWindowsOverlay'])
+            self.assertNotIn('nasSource', variant)
+            self.assertEqual(self.request('POST', route, request)['windowsLaunch']['isolation'],
+                             'account-private-overlay')
+
     def test_metadata_cas_and_account_collections(self):
         g=self.game(); cid=str(uuid.uuid4())
         self.request('POST','/api/library/collections',dict(id=cid,name='Favorites'))
@@ -101,6 +199,54 @@ class UnifiedLibraryTests(unittest.TestCase):
         with ThreadPoolExecutor(2) as pool: results=list(pool.map(launch,[g,v]))
         self.assertEqual(results.count(409),1)
         self.assertEqual(len(self.driver.active),1)
+
+    def test_mz_snapshot_commit_uses_canonical_close_barrier(self):
+        import zlib
+        from gameshelf_server.mz_save_format import (commit_progress_snapshot, read_progress_snapshot,
+                                                    read_webkit_progress, webkit_progress_snapshot)
+
+        web = self.game()
+        windows = self.s.publish(self.s.candidates()[0]['id'], save_paths=[
+            dict(path='save',kind='directory')
+        ])['id']
+        self.request('POST',f'/api/admin/library/games/{web}/variants',dict(variantIDs=[windows]),self.at)
+        for user in (self.a, self.b):
+            for variant in (web, windows):
+                self.s.grant(user['id'],variant,True)
+
+        def snapshot(user):
+            return self.s.state / (user['id']+'-'+web+'.json')
+
+        def encode(value):
+            return zlib.compress(json.dumps(value).encode()).decode('latin1').encode()
+
+        progress = dict(system={}, party={'level': 17}, map={}, player={})
+        files = {'file1': encode(progress), 'global': encode([None, {'timestamp': 1}])}
+        first = self.s.session(self.a,windows,'windows')
+        close_driver = self.driver.close
+        commit_failure = True
+
+        def close_and_commit(lease):
+            close_driver(lease)
+            if lease['id'] == first['leaseID']:
+                if commit_failure:
+                    raise OSError('synthetic snapshot write failure')
+                commit_progress_snapshot(snapshot(self.a),123456,files,expected={})
+
+        with patch.object(self.driver,'close',side_effect=close_and_commit):
+            self.denied(lambda:self.s.release(self.a,first['leaseID']),503)
+            self.denied(lambda:self.s.session(self.a,web,'mac'),503)
+            self.assertFalse(snapshot(self.a).exists())
+            other = self.s.session(self.b,web,'other account')
+            self.assertFalse(snapshot(self.b).exists())
+            self.s.release(self.b,other['leaseID'])
+            commit_failure = False
+            self.s.release(self.a,first['leaseID'])
+            second = self.s.session(self.a,web,'mac')
+            reopened = read_progress_snapshot(snapshot(self.a),123456)
+            mac_snapshot = webkit_progress_snapshot('a'*64,123456,reopened)
+            self.assertEqual(read_webkit_progress(mac_snapshot,'a'*64,123456),files)
+            self.s.release(self.a,second['leaseID'])
 
     def test_malformed_selectors_fail_as_client_errors(self):
         g=self.game()

@@ -152,18 +152,39 @@ final class AccountOwnerTransitionGate {
  /// no bridge. Nonempty profiles require a private accepted baseline AND trusted
  /// immutable server history authentication; later gameplay is left untouched.
  static func loadApprovedAliases(profileRoot:URL,owner:AccountLibraryIdentity,savedBinding:PersonalLibraryBinding?,verifyHistoricalReceipt:VerifyHistoricalReceipt?=nil)throws->[UUID:String] {
-  _ = try AccountLibraryCache(root:profileRoot,identity:owner)
-  guard let bytes=try AccountLibraryDisk.regularData(profileRoot.appendingPathComponent("game-links.json"),limit:512*1024) else{return [:]}
-  let raw=try JSONDecoder().decode([String:String].self,from:bytes)
-  if raw.isEmpty{return [:]}
-  let manifest=try AccountLibraryMigrationManifest(profileRoot:profileRoot,owner:owner,savedBinding:savedBinding)
-  let links=try manifest.load()
+  let snapshot=try aliasSnapshot(profileRoot:profileRoot,owner:owner,savedBinding:savedBinding)
+  if snapshot.links.isEmpty{return [:]}
   guard let verifier=verifyHistoricalReceipt else{throw LibraryError("Original profile retained: trusted historical adoption verifier is unavailable.")}
-  let baseline=try accepted(root:profileRoot,owner:owner,links:links)
-  for confirmation in baseline.confirmations {
+  for confirmation in snapshot.confirmations {
    guard try verifier(confirmation.payload.operationID)==confirmation else{throw LibraryError("Accepted adoption history changed.")}
   }
-  return links
+  return snapshot.links
+ }
+ @MainActor static func loadApprovedAliases(profileRoot:URL,owner:AccountLibraryIdentity,savedBinding:PersonalLibraryBinding?,fetchHistoricalReceipt:(String)async throws->AccountOwnerTransitionConfirmation)async throws->[UUID:String] {
+  let snapshot=try aliasSnapshot(profileRoot:profileRoot,owner:owner,savedBinding:savedBinding)
+  if snapshot.links.isEmpty{return [:]}
+  for confirmation in snapshot.confirmations {
+   try Task.checkCancellation()
+   guard try await fetchHistoricalReceipt(confirmation.payload.operationID)==confirmation else{throw LibraryError("Accepted adoption history changed.")}
+  }
+  try Task.checkCancellation()
+  guard try aliasSnapshot(profileRoot:profileRoot,owner:owner,savedBinding:savedBinding)==snapshot else{throw LibraryError("Accepted adoption history changed.")}
+  return snapshot.links
+ }
+ private struct AliasSnapshot:Equatable {
+  let links:[UUID:String]
+  let confirmations:[AccountOwnerTransitionConfirmation]
+ }
+ private static func aliasSnapshot(profileRoot:URL,owner:AccountLibraryIdentity,savedBinding:PersonalLibraryBinding?)throws->AliasSnapshot {
+  _ = try AccountLibraryCache(root:profileRoot,identity:owner)
+  let file=profileRoot.appendingPathComponent("game-links.json")
+  guard let bytes=try AccountLibraryDisk.regularData(file,limit:512*1024) else{return AliasSnapshot(links:[:],confirmations:[])}
+  let raw=try JSONDecoder().decode([String:String].self,from:bytes)
+  if raw.isEmpty{return AliasSnapshot(links:[:],confirmations:[])}
+  let manifest=try AccountLibraryMigrationManifest(profileRoot:profileRoot,owner:owner,savedBinding:savedBinding)
+  let links=try manifest.load()
+  let baseline=try accepted(root:profileRoot,owner:owner,links:links)
+  return AliasSnapshot(links:links,confirmations:baseline.confirmations)
  }
  /// Called only by the typed Manifest mutator, on one serialized owner.
  static func commitAliases(root:URL,owner:AccountLibraryIdentity,current:[UUID:String],next:[UUID:String],plan:AccountLibraryMigrationPlan,resolutions:[AccountLibraryMigrationResolution],permits:[AccountOwnerTransitionPermit])throws {

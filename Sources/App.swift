@@ -136,7 +136,7 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
  }
  var root:URL {
   if let i=CommandLine.arguments.firstIndex(of:"--data-dir"),CommandLine.arguments.indices.contains(i+1){return URL(fileURLWithPath:CommandLine.arguments[i+1])}
-  let folder=(Bundle.main.object(forInfoDictionaryKey:"GameShelfPreviewBuild") as? Bool)==true ? "GameShelf Preview":"GameShelf"
+  let folder=directNASPreviewEnabled ? "GameShelf Direct NAS Preview" : ((Bundle.main.object(forInfoDictionaryKey:"GameShelfPreviewBuild") as? Bool)==true ? "GameShelf Preview":"GameShelf")
   return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support").appendingPathComponent(folder)
  }
  func applicationDidFinishLaunching(_ notification:Notification){
@@ -494,7 +494,19 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
   if let issue=accountLibrary?.launchIssue(for:game.id){errorAlert(LibraryError(issue));return}
   guard updates?.installationRequested != true else{showStatus("更新正在等待安装，请稍后启动游戏。");return}
   guard !busy,active==nil else{return}
-  if game.shared != nil,let session=sharedSessions[game.id],session.closing || session.unmounted {
+  do {
+   if sharedSessions[game.id] == nil, let original = try accountLibrary?.originalNativeLaunch(for: game) {
+    beginGameLoading(game)
+    startNativeApplication(game, original: original)
+    return
+   }
+  } catch { errorAlert(error); return }
+  // MZ web entries use the account lease and WebKit save bridge even in the direct NAS preview.
+  if sharedSessions[game.id] == nil,canBindDirectNAS(game),
+     !(game.entry.backend == .rpgmz && game.entry.path == "index.html") {
+   launchDirectNASPreview(game);return
+  }
+  if game.shared != nil,let session=sharedSessions[game.id],session.releaseRequested {
    showStatus("上一次共享会话正在关闭，请稍后再启动。");return
   }
   beginGameLoading(game)
@@ -515,14 +527,15 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
    prepareWine(game)
   }
  }
- func startNativeApplication(_ game:Game){
+ func startNativeApplication(_ game:Game, original: Game? = nil){
+  let launchGame = original ?? game
   if nativeLaunching.contains(game.id){showStatus("macOS 正在启动或验证此游戏，请勿重复开启。");return}
   if let app=nativeApplications[game.id],!app.isTerminated{
    if unverifiedNativeApplications.contains(game.id){setBusy(false,"");errorAlert(LibraryError("请先退出已在其他方式启动的游戏，再从账号游戏库重新启动。"));return}
    finishGameLoading();app.activate(options:[.activateAllWindows]);return
   }
-  let cachedApp=root.appendingPathComponent("NativeApps/"+game.id.uuidString+".app")
-  let sourceApp=URL(fileURLWithPath:game.folder).appendingPathComponent(game.entry.path)
+  let cachedApp=root.appendingPathComponent("NativeApps/"+launchGame.id.uuidString+".app")
+  let sourceApp=URL(fileURLWithPath:launchGame.folder).appendingPathComponent(launchGame.entry.path)
   if let existing=nativeApplicationLookup(cachedApp) ?? nativeApplicationLookup(sourceApp) {
    if game.shared != nil {
     // Track the old writer without adopting its unknown argv/save environment.
@@ -540,14 +553,20 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
   let renpyProof=sharedSessions[game.id]?.lease.renpyLaunch
   DispatchQueue.global(qos:.userInitiated).async {
    do {
-    let managedRoot=try self.saveDataRoot(for:game)
-    if game.shared != nil {
-     let sourceApp=URL(fileURLWithPath:game.folder).appendingPathComponent(game.entry.path)
+    let managedRoot=try self.saveDataRoot(for:launchGame)
+    if launchGame.shared != nil {
+     let sourceApp=URL(fileURLWithPath:launchGame.folder).appendingPathComponent(launchGame.entry.path)
      guard FileManager.default.fileExists(atPath:sourceApp.appendingPathComponent("Contents/Resources/autorun/renpy/vc_version.py").path) else{throw LibraryError("此原生游戏的账号存档位置尚未适配。请使用已提供的 Windows 入口，或先添加该引擎的存档适配；未在公共用户目录启动。")}
     }
     let verifier:((URL)throws->Void)?=renpyProof.map{proof in {stage in try proof.verifyCachedApp(stage,entryPath:game.entry.path,sourceView:URL(fileURLWithPath:game.folder))}}
-    let plan=try NativeAppCache.prepare(game:game,root:localRoot,reviewedRuntimeProfile:renpyProof.map{"renpy-savedir-v1/"+$0.evidenceSHA256},verifyReviewedRuntime:verifier)
-    let storageID=try NativeGameSaves.storageID(game:game,localRoot:localRoot)
+    let storageID=try NativeGameSaves.storageID(game:launchGame,localRoot:localRoot,existingOnly:original != nil)
+    if original != nil {
+     let retained = managedRoot.appendingPathComponent("Saves/NativeApps/"+storageID.uuidString)
+     guard (try FileManager.default.attributesOfItem(atPath: retained.path)[.type] as? FileAttributeType) == .typeDirectory else {
+      throw LibraryError("找不到原有 macOS 存档目录，请检查运行数据位置。")
+     }
+    }
+    let plan=try NativeAppCache.prepare(game:launchGame,root:localRoot,enableOwnerMediaIndex:original != nil,reviewedRuntimeProfile:renpyProof.map{"renpy-savedir-v1/"+$0.evidenceSHA256},verifyReviewedRuntime:verifier)
     let autorun=plan.app.appendingPathComponent("Contents/Resources/autorun")
     var arguments:[String]=[],environment=plan.environment
     if FileManager.default.fileExists(atPath:autorun.appendingPathComponent("renpy/vc_version.py").path){
@@ -561,13 +580,15 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
      }else{arguments=["--savedir",saves.path]}
      environment["RENPY_LOG_BASE"]=logs.path;environment["PYTHONDONTWRITEBYTECODE"]="1"
      environment["GAMESHELF_SMB_RPA_CLOSE"]=NativeVolumePolicy.usesSMB(autorun.appendingPathComponent("game").resolvingSymlinksInPath()) ? "1":"0"
-     if let language=game.nativeLanguage,!language.isEmpty{environment["RENPY_LANGUAGE"]=language}
+     if let language=launchGame.nativeLanguage,!language.isEmpty{environment["RENPY_LANGUAGE"]=language}
     }else if let data=try? Data(contentsOf:plan.app.appendingPathComponent("Contents/Info.plist")),let info=try? PropertyListSerialization.propertyList(from:data,format:nil) as? [String:Any],info["CFBundleExecutable"] as? String=="Phoenixes" {
-     try NativeGameSaves.preparePhoenixes(game:game,managedRoot:managedRoot,localRoot:localRoot)
+     try NativeGameSaves.preparePhoenixes(game:launchGame,managedRoot:managedRoot,localRoot:localRoot,existingOnly:original != nil)
      arguments=["--language","zh_CN"]
+    }else if original != nil {
+     throw LibraryError("此原有 macOS 游戏的存档启动方式尚未适配。")
     }
     self.preparationReady {
-     if game.shared != nil,let existing=self.nativeApplicationLookup(plan.app) ?? self.nativeApplicationLookup(URL(fileURLWithPath:game.folder).appendingPathComponent(game.entry.path)) {
+     if game.shared != nil,let existing=self.nativeApplicationLookup(plan.app) ?? self.nativeApplicationLookup(URL(fileURLWithPath:launchGame.folder).appendingPathComponent(launchGame.entry.path)) {
       self.blockUnverifiedNative(game,process:existing);return
      }
      let config=NSWorkspace.OpenConfiguration();config.createsNewApplicationInstance=true;config.arguments=arguments;config.environment=environment
@@ -598,7 +619,9 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
    let engines=root.appendingPathComponent("Engines")
    let dataRoot=runtimeDataRoot(for:game)
    guard FileManager.default.fileExists(atPath:dataRoot.path) else{setBusy(false,"");errorAlert(LibraryError("运行数据位置不可用，请确认磁盘或共享目录可访问，或在设置中重新选择。"));return}
-   let destination=dataRoot.appendingPathComponent("Runtimes/"+game.id.uuidString+".app")
+   let mountedWorkspace=sharedSessions[game.id]?.lease.mountedWorkspace != nil
+   let runtimes=mountedWorkspace ? "MountedRuntimes/" : "Runtimes/"
+   let destination=dataRoot.appendingPathComponent(runtimes+game.id.uuidString+".app")
    let renpyProof=sharedSessions[game.id]?.lease.renpyLaunch
    DispatchQueue.global(qos:.userInitiated).async{
     do {
@@ -611,7 +634,7 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
      let launchGame=game.shared == nil ? try RPGDictionary.prepareIfNeeded(game:cursorGame,dataRoot:dataRoot,tools:Bundle.main.resourceURL!.appendingPathComponent("Tools")):cursorGame
      self.preparationReady{self.showStatus("正在检查运行环境…")}
      let app=try Wrapper.prepare(game:launchGame,source:source,destination:destination,shareEngine:true,freshPrefix:game.shared != nil)
-     try SharedWineBootstrap.prepare(game:launchGame,runtime:app)
+     try SharedWineBootstrap.prepare(game:launchGame,runtime:app,mountedWorkspace:mountedWorkspace)
      self.preparationReady{self.showStatus("正在检查运行组件…")}
      try RTP.register(game:launchGame,runtime:app,root:self.runtimeRoot.appendingPathComponent("Dependencies"))
      if let proof=renpyProof{try proof.verify(view:URL(fileURLWithPath:game.folder))}
@@ -666,13 +689,13 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
    }catch{self.preparationReady{self.setBusy(false,"");self.errorAlert(error)}}
   }
  }
- func startWine(_ game:Game,runtime:URL,launchGame:Game?=nil){
+ func startWine(_ game:Game,runtime:URL,launchGame:Game?=nil,directNAS:Bool=false){
   do {
    if wineSessions.contains(game.id) {setBusy(false,"");throw LibraryError("此游戏仍在运行，请先回到游戏窗口或退出后重试。")}
    if game.entry.engine=="Unity" && game.entry.path.lowercased()=="pure-onyx.exe" {
     try PureOnyxDisplaySettings.apply(prefix:runtime.appendingPathComponent("Contents/SharedSupport/prefix"),fullscreen:game.wineFullscreen == true)
    }
-   var spec=try Wrapper.gameWindowLaunchSpec(game:launchGame ?? game,runtime:runtime)
+   var spec=try Wrapper.gameWindowLaunchSpec(game:launchGame ?? game,runtime:runtime,directNAS:directNAS)
    if let namespace=sharedSessions[game.id]?.lease.saveNamespace {
     // Full export hashing runs on the preparation queue before this callback.
     guard sharedSessions[game.id]?.lease.renpyLaunch != nil else{throw LibraryError("缺少账号运行校验，未启动游戏。")}
@@ -681,7 +704,7 @@ final class App:NSObject,NSApplicationDelegate,NSSearchFieldDelegate,NSMenuItemV
     spec.arguments += locations.wine.arguments
     spec.environment.merge(locations.wine.environment){_,new in new}
    }
-   let wait=try Wrapper.waitSpec(game:game,runtime:runtime)
+   let wait=try Wrapper.waitSpec(game:directNAS ? (launchGame ?? game):game,runtime:runtime,directNAS:directNAS)
    let logs=runtime.appendingPathComponent("Contents/SharedSupport/Logs")
    try FileManager.default.createDirectory(at:logs,withIntermediateDirectories:true)
    let log=logs.appendingPathComponent("GameShelf-"+String(Int(Date().timeIntervalSince1970))+".log")

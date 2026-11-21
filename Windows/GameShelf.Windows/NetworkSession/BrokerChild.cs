@@ -17,7 +17,8 @@ public static class BrokerChild
             await BrokerWire.Write(pipe,own,handshake.Token);var nonce=await BrokerWire.Read<BrokerChallenge>(pipe,handshake.Token);
             if(nonce.Value.Length!=64||!nonce.Value.All(Uri.IsHexDigit))throw new BrokerFailure(BrokerStage.Identity);
             await BrokerWire.Write(pipe,nonce,handshake.Token);
-            engine=new(operation,new WindowsView(),BrokerReview.Validate,e=>e is SmbMappingException smb?smb.Win32Error:e is MappedUserQueryException mapped?(int)mapped.NativeErrorCode:null);
+            engine=new(operation,new WindowsView(),BrokerReview.Validate,e=>e is SmbMappingException smb?smb.Win32Error:e is MappedUserQueryException mapped?(int)mapped.NativeErrorCode:e is System.ComponentModel.Win32Exception native?native.NativeErrorCode:null,
+                smbStage: e => e is SmbMappingException mapping ? mapping.Stage : null);
             using var lost=new CancellationTokenSource();
             Task<BrokerRequest> read=BrokerWire.Read<BrokerRequest>(pipe,lost.Token);
             while(true){

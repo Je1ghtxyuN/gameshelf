@@ -16,9 +16,60 @@ Copy `.env.example` to a private `.env` beside `compose.yaml`; set the paths. Co
 
 复制 `.env.example` 为私有 `.env` 并填写路径。默认仅绑定宿主回环地址；局域网访问需将 `GAMESHELF_BIND_IP` 改为指定网卡地址。HTTPS 8787、SMB 1445 与宿主现有 445 分离。配置文件和密码文件不要提交到仓库。
 
+For a gateway with a dedicated private SMB address, set `GAMESHELF_SMB_BIND_IP` to that address, `GAMESHELF_SMB_HOST` to the name clients use for it, and `GAMESHELF_SMB_PORT=445`. Verify the address belongs to the host and port 445 is available on it before starting Compose. A host SMB listener bound to all interfaces also occupies the dedicated address. HTTPS still uses `GAMESHELF_BIND_IP`.
+
+如果网关有独立的私网 SMB 地址，将 `GAMESHELF_SMB_BIND_IP` 设为该地址，`GAMESHELF_SMB_HOST` 设为客户端用于连接的名称，并设定 `GAMESHELF_SMB_PORT=445`。启动前确认地址已分配给宿主机，且该地址的 445 端口可用。监听所有接口的宿主 SMB 服务也会占用该地址。HTTPS 仍使用 `GAMESHELF_BIND_IP`。
+
 The service has no `--privileged`, host network/PID namespace, Docker socket, host devices or host Samba mounts. `SYS_ADMIN` permits private OverlayFS mounts; CHOWN/DAC_OVERRIDE/FOWNER prepare metadata; SETUID/SETGID let Samba use unprivileged account identities; MKNOD permits overlay whiteouts; NET_BIND_SERVICE binds container port 445. Session Unix uids are distinct; shares use a stable **unprivileged account** `force user`, never root. The container filesystem is ephemeral and writable because `useradd` needs its own `/etc`; only `/state` persists. The default Docker seccomp profile is retained. Docker's stock AppArmor policy blocks mounts, so Compose selects `apparmor:unconfined`; replace it with a reviewed mount-capable local profile if available. This is a mount-capable service, not a hostile-code execution container: it never executes uploaded games.
 
 容器仅增加挂载、文件权限准备、Samba 身份切换及白化文件所需能力；不使用特权模式或宿主网络/PID/设备。Samba 的文件访问身份是账号私有普通 uid，不是 root。默认保留 Docker seccomp；默认 AppArmor 禁止挂载，因此示例仅取消该容器的 AppArmor 限制，可替换为允许所需挂载的受审查本地策略。容器不会运行游戏。
+
+### Family NAS library / 家庭 NAS 游戏库
+
+Set `GAMESHELF_DIRECT_NAS=1` for a household whose members already have NAS access. An administrator adding scan results puts those editions into the shared library for current and future enabled accounts. Existing private entries enter the shared library when the administrator selects and adds them again. Scan results alone stay outside the library. Playtime remains per account. A direct NAS source, when offered for an edition, is identified by a root ID and a relative path. The Linux gateway routes Windows editions through the account workspace from the first launch. This keeps new relative saves private even when the scan found no existing saves. Reviewed adapters continue to handle their engine-specific paths.
+
+家庭成员已有 NAS 权限时可启用 `GAMESHELF_DIRECT_NAS=1`。管理员选中扫描结果并加入后，当前和未来启用的账号都能看到这些版本。既有私有条目由管理员重新选中加入后进入共享库。时长按账号保存。支持直接读取 NAS 源目录的版本使用根目录标识和相对路径。Linux 网关上的 Windows 版从第一次启动起就使用账号工作区。即使扫描时没有发现存档，后续写入游戏相对路径的存档也会留在账号工作区。引擎专用存档继续由对应的适配器处理。
+
+### Reuse system SMB authentication
+
+On the NAS, create a dedicated shared mount for GameShelf workspaces outside the game source, gateway state and existing Samba share roots. Give each GameShelf account its own Samba share, restricted to its existing NAS login and mapped to the account's workspace UID. Run `python -m gameshelf_server.workspace_export` on the NAS against the gateway database and effective Samba configuration. Use `--emit-manifest` to save the validated share mapping to a root-owned file with mode `0600`. Keep the manifest private and regenerate it after changes to the NAS accounts or share configuration.
+
+Start Compose with both `compose.yaml` and `compose.workspace-exports.yaml`. Set `GAMESHELF_DIRECT_NAS=1`, `GAMESHELF_WORKSPACE_EXPORT_DIR` to the dedicated host mount and `GAMESHELF_WORKSPACE_MANIFEST_FILE` to the manifest. Connect to the account share in Finder or map it as a network drive in Windows Explorer. The gateway publishes the active workspace there and removes it when the session closes. Keep the export mount in place until all game sessions close before changing the deployment. Enable this mode after updating clients and configuring each member’s NAS identity. In this mode, clients must use their mapped system SMB share to start a network game.
+
+
+### Self-service SMB enrollment (Linux Samba candidate)
+
+On a Linux Samba host, dedicate separate directories for workspace exports, verification proofs and the host socket. Keep both exports and proofs outside existing shares. The export directory is a root-owned shared mount with mode `0711`. The proof directory is root-owned with mode `0711`. The socket and managed configuration directories are root-owned with mode `0700`. Start with an empty root-owned managed include file with mode `0600`.
+
+Add an absolute `include = /path/to/gameshelf-managed.conf` under the Samba global section. Set up a local eligible group for GameShelf members and a proof share. Use your own absolute proof directory and group name.
+
+```ini
+[gameshelf-verify]
+    path = /srv/gameshelf-proofs
+    valid users = @gameshelf-members
+    read only = yes
+    guest ok = no
+    wide links = no
+    follow symlinks = no
+    smb encrypt = required
+```
+
+Run `python -m gameshelf_server.smb_enrollment_host --help` for the host service arguments. Point it at the gateway database, Samba config, managed include, export root, proof root and socket. The host process needs administrative access to resolve Samba identities and configure workspace shares. The gateway connects to that process over the private socket.
+
+Start Compose with `compose.yaml`, `compose.workspace-exports.yaml` and `compose.smb-enrollment.yaml`. Set `GAMESHELF_DIRECT_NAS=1`, `GAMESHELF_SMB_ENROLLMENT_SOCKET_DIR` and `GAMESHELF_SMB_VERIFICATION_SHARE`, along with the export settings above. A new self-service deployment can use `{}` as its initial private manifest. For deployments with existing manually managed workspace shares, retain the validated private manifest and start the host with `--legacy-mapping` pointing to the original account mapping JSON. Keep that JSON root-owned with mode `0600`. The host revalidates those shares against the effective Samba settings and gateway database when provisioning new members.
+
+Members sign in to GameShelf and connect to the verification share through Finder or Windows Explorer. In account settings they enter their SMB username and verify access. GameShelf then shows the private workspace share to mount. Users enter NAS passwords only into the operating system’s SMB prompt.
+
+
+### Optional Windows SMB address / Windows 专用 SMB 地址
+
+Set `GAMESHELF_WINDOWS_SMB_HOST` to a private LAN or overlay-network IPv4 address only when the same gateway's encrypted Samba service already listens there on TCP 445 and Windows clients can reach it. This setting advertises the address for new Windows account launch requests. Configure the listener and its network separately. Other clients and older Windows builds retain the default `GAMESHELF_SMB_HOST` and `GAMESHELF_SMB_PORT` settings.
+
+若同一个网关的加密 Samba 服务已在局域网或 Tailscale 等私有网络地址的 TCP 445 上监听，且 Windows 客户端可达，可设置 `GAMESHELF_WINDOWS_SMB_HOST`。此项用于新 Windows 客户端的账号游戏启动，监听和路由需单独配置。其他客户端及旧 Windows 构建继续使用默认 SMB 地址与端口。只在 Windows 客户端均可到达该地址的部署中启用。
+
+For a NAS that already serves other SMB shares on port 445, a Tailscale Service can provide its own virtual IP and TCP 445. Configure the Service as a private TCP forwarder to the GameShelf gateway’s SMB listener and restrict its tailnet access to intended devices. Set the Windows override to that Service IP after validating a complete authenticated lease, native launch and release from Windows. The device LAN address can then change independently. See [Tailscale Services](https://tailscale.com/docs/features/tailscale-services).
+
+如果 NAS 已有其他 SMB 服务占用 445，可用 Tailscale Service 分配独立虚拟 IP，并将私有网络的 TCP 445 转发到 GameShelf 网关的 SMB 监听端口。通过 Tailnet 规则限制可访问设备。在 Windows 验证账号会话、游戏启动和退出释放后，将专用地址设为该 Service 的虚拟 IP。家里或学校的局域网地址可独立变化。
 
 ### TLS certificate and pin / TLS 证书与指纹
 

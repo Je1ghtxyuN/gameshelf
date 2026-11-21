@@ -101,12 +101,16 @@ enum ManagedWine {
   let source=root.appendingPathComponent(m.id+".app")
   return isManaged(source:source) ? source:nil
  }
- static func resolve(configured:URL?,root:URL,progress:@escaping(String)->Void)throws->URL {
+ static func resolve(configured:URL?,root:URL,allowInstall:Bool=true,progress:@escaping(String)->Void)throws->URL {
   if let source=configured,source.isFileURL {
    if isManaged(source:source),let record=ownedReceipt(source:source),cache(root:source.deletingLastPathComponent(),manifest:record.manifest)?.path==source.path {try platform(record.manifest);return source}
    if !isManaged(source:source) && (["Contents/MacOS/wineskinlauncher","Contents/SharedSupport/wine/bin/wine64","Contents/SharedSupport/wine/bin/wineserver"].allSatisfy{FileManager.default.isExecutableFile(atPath:source.appendingPathComponent($0).path)} && FileManager.default.fileExists(atPath:source.appendingPathComponent("Contents/Frameworks").path)){return source}
   }
   let m=try manifest();try platform(m)
+  if !allowInstall {
+   guard let installed=cache(root:root,manifest:m) else{throw LibraryError("此游戏需要已安装的 Wine 运行环境。请在预览设置中选择可用的 Wine 引擎。")}
+   return installed
+  }
   return try install(manifest:m,root:root,progress:progress,download:{m,target,check in
    try check()
    guard let context=Thread.current.threadDictionary["GameShelfManagedWineContext"] as? Context else{throw Failure.cancelled}

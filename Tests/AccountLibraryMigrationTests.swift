@@ -61,6 +61,16 @@ import Foundation
   try check(try make([renamed]).selections.first?.selectionID==w.selectionID,"titles must never influence registration identity")
   let canonicalW=String(repeating:"d",count:32),canonicalM=String(repeating:"e",count:32),variantW=String(repeating:"f",count:32),variantM=String(repeating:"1",count:32)
   var doc=AccountLibraryDocument(schemaVersion:2,serverID:"server",user:AccountLibraryUser(id:"owner",username:"Owner",admin:true),games:[AccountLibraryGame(id:canonicalW,title:"Not a match key",revision:1,favorite:false,collectionIDs:[],playtimeSeconds:0,variants:[AccountLibraryVariant(id:variantW,platform:"windows",entries:[exe],available:true)]),AccountLibraryGame(id:canonicalM,title:"Not a match key",revision:1,favorite:false,collectionIDs:[],playtimeSeconds:0,variants:[AccountLibraryVariant(id:variantM,platform:"macos",entries:[app],available:true)])],collections:[])
+  let launchBinding=AccountOwnerNativeLaunchBinding(owner:owner,localID:mac.id,canonicalID:canonicalM,variantID:variantM,entryPath:app.path,folder:mac.folder,originalFolder:mac.originalFolder)
+  let remoteMac=doc.games[1]
+  let selectedMac=try remoteMac.selection(platform:"macos")
+  try check(launchBinding.matches(original:mac,game:remoteMac,selection:selectedMac,identity:owner,savedBinding:binding),"exact owner and version preserve the native launch")
+  try check(!launchBinding.matches(original:mac,game:remoteMac,selection:selectedMac,identity:guest,savedBinding:binding),"another account cannot use the original save route")
+  var relocatedMac=mac;relocatedMac.originalFolder += "-moved"
+  try check(!launchBinding.matches(original:relocatedMac,game:remoteMac,selection:selectedMac,identity:owner,savedBinding:binding),"changed original path requires revalidation")
+  var compatible=selectedMac.variant;compatible.saveCompatibilityKey="managed"
+  let managed=AccountLibrarySelection(variant:compatible,entry:app)
+  try check(!launchBinding.matches(original:mac,game:remoteMac,selection:managed,identity:owner,savedBinding:binding),"a managed shared-save edition cannot use the old route")
   // Server selected-register legitimately re-probes the engine label. Physical
   // entry identity stays path + backend; the orchestrator verifies source SHA.
   doc.games[1].variants[0].entries[0].engine="renpy"

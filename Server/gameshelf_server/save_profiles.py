@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import stat
 import uuid
@@ -15,8 +15,20 @@ from .accounts import fields
 ADAPTER='renpy-savedir-v1'
 RELATIVE='.gameshelf-profile/CanonicalSaves/renpy'
 CATALOG='reviewed-renpy-profiles.json'
-UNSAFE_LOCATIONS={'7a84aea6ddccab67c7e004d94cd38092e4a910c15ccb6fabb44aecbde1108427'}
-PATCHED_837='ba48a4c044ec8d557bbc2f42aab441caaf52480ebeb29f2a9208594b6dc09596'
+LOCATION_PATCHES = {
+    # Ren'Py 8.1.3
+    '2fcd8f8dd88e85fd689a91db1f98c7ab7c5790d3b871b1f89420e27db3bba8f2':
+        '178aaa36fba90afcaed683e31048200328653fbbf4bc7c6c7e9d5ac65f721c24',
+    # Ren'Py 8.3.7
+    '7a84aea6ddccab67c7e004d94cd38092e4a910c15ccb6fabb44aecbde1108427':
+        'ba48a4c044ec8d557bbc2f42aab441caaf52480ebeb29f2a9208594b6dc09596',
+    # Ren'Py 8.3.2
+    '3ed845b5c9d13dcf581a9143b5fc933fc1dfad8f03c93bccc2ef0955adb7e884':
+        '36e6fe2778ad3d2ca6afe0325eba33661e05e7703b264cf7c0a34dcdf8991365',
+    # Ren'Py 8.5.2
+    'e0b32aab4127325a307a8396b6a9b636781161fd23d595127e668d784342b85c':
+        '1b4b59ac6e0359d99da69378a18a446eecb0c08038e7d06452e56a19bbca46d4',
+}
 ROLES={'entry','bootstrap','arguments','main','locations','persistent','tokens','config'}
 
 
@@ -65,7 +77,7 @@ def validate_catalog(payload):
     catalog={}
     for original in payload['profiles']:
         profile=copy.deepcopy(original)
-        fields(profile,('id','revision','adapter','compatibilityKey','synthetic','isolationPolicy','review','variants'))
+        fields(profile,('id','revision','adapter','compatibilityKey','synthetic','isolationPolicy','review','variants'),('scope',))
         _tag(profile['id']); _tag(profile['compatibilityKey'])
         if profile['id'] in catalog or type(profile['revision']) is not int or profile['revision']<1 or type(profile['synthetic']) is not bool:
             raise APIError(400,'Invalid reviewed profile version')
@@ -75,6 +87,8 @@ def validate_catalog(payload):
         if any(not isinstance(v,str) or not v.strip() or len(v)>2048 for v in profile['review'].values()): raise APIError(400,'Missing review provenance')
         variants=profile['variants']
         if not isinstance(variants,list) or not 1<=len(variants)<=32: raise APIError(400,'Invalid reviewed variants')
+        if 'scope' in profile and (profile['scope']!='edition' or len(variants)!=1):
+            raise APIError(400,'Edition save scope requires exactly one reviewed variant')
         seen=set()
         for variant in variants:
             fields(variant,('id','platform','entryPath','entryBackend','savePaths','legacySavePaths','fingerprints'),('patches',))
@@ -101,7 +115,7 @@ def validate_catalog(payload):
             elif not any(f['path']==path and f['role']=='entry' for f in fingerprints): raise APIError(400,'EXE fingerprint must match entryPath')
             patched=set()
             for patch in variant.get('patches',[]):
-                fields(patch,('path','sourceSHA256','targetSHA256','replacementBase64'))
+                fields(patch,('path','sourceSHA256','targetSHA256','replacementBase64'),('compiledCaches',))
                 relative(patch['path']); _sha(patch['sourceSHA256']); _sha(patch['targetSHA256'])
                 source=next((f for f in fingerprints if f['path']==patch['path']),None)
                 if patch['path'] in patched or not source or source['role'] not in ROLES-{'entry'} or not patch['path'].endswith('.py') or source['sha256']!=patch['sourceSHA256']:
@@ -109,10 +123,28 @@ def validate_catalog(payload):
                 try: data=base64.b64decode(patch['replacementBase64'],validate=True)
                 except (ValueError,TypeError): raise APIError(400,'Invalid reviewed patch encoding') from None
                 if len(data)>512*1024 or hashlib.sha256(data).hexdigest()!=patch['targetSHA256']: raise APIError(400,'Reviewed patch target digest mismatch')
+                caches = patch.get('compiledCaches', [])
+                if not isinstance(caches, list) or len(caches) > 16:
+                    raise APIError(400, 'Invalid reviewed compiled caches')
+                cache_paths = set()
+                module = PurePosixPath(patch['path'])
+                for cache in caches:
+                    fields(cache, ('path', 'sha256'))
+                    path = PurePosixPath(relative(cache['path']))
+                    _sha(cache['sha256'])
+                    if path.parent != module.parent / '__pycache__' or not re.fullmatch(
+                        re.escape(module.stem) + r'\.cpython-[0-9]+(?:\.opt-[12])?\.pyc', path.name
+                    ) or path.as_posix().casefold() in names | cache_paths:
+                        raise APIError(400, 'Compiled cache must belong to its reviewed module')
+                    cache_paths.add(path.as_posix().casefold())
                 patched.add(patch['path'])
             for item in fingerprints:
-                if item['role']=='locations' and item['sha256'] in UNSAFE_LOCATIONS and not any(p['path']==item['path'] and p['targetSHA256']==PATCHED_837 for p in variant.get('patches',[])):
-                    raise APIError(400,'Unpatched RenPy 8.3.7 secondary save locations are not isolated')
+                required_patch = LOCATION_PATCHES.get(item['sha256']) if item['role'] == 'locations' else None
+                if required_patch and not any(
+                    p['path'] == item['path'] and p['targetSHA256'] == required_patch
+                    for p in variant.get('patches', [])
+                ):
+                    raise APIError(400, 'RenPy secondary save locations require the approved runtime patch')
             variant['entrySHA256']=next(f['sha256'] for f in fingerprints if f['role']=='entry')
         profile['rulesSHA256']=digest(dict(adapter=ADAPTER,relativePath=RELATIVE,compatibilityKey=profile['compatibilityKey'],
             variants=[dict(id=v['id'],savePaths=v['savePaths'],legacySavePaths=v['legacySavePaths']) for v in variants]))
@@ -152,13 +184,21 @@ def verify_variant(folder,variant,*,save_paths=None,entries=None,export=False):
     _canonical_relative(folder,variant['entryPath'],directory=variant['platform']=='macos')
     if save_paths is not None:
         from .privacy import normalize_rules
-        if normalize_rules(save_paths,folder)!=variant['savePaths']: raise APIError(409,'Publish explicitly reviewed save exclusions before activating namespace')
+        reviewed = {rule['path'] for rule in variant['savePaths']}
+        published = normalize_rules(save_paths,folder)
+        # Discovery also records individual seed files. A file under a reviewed
+        # directory adds no coverage, but the directory rule itself is required.
+        effective = [rule for rule in published if not (
+            rule['kind']=='file' and any(parent.as_posix() in reviewed
+                                        for parent in PurePosixPath(rule['path']).parents)
+        )]
+        if effective!=variant['savePaths']: raise APIError(409,'Publish explicitly reviewed save exclusions before activating namespace')
     for item in variant['fingerprints']:
         expected=item['sha256']
         if export:
             patch=next((p for p in variant.get('patches',[]) if p['path']==item['path']),None)
             if patch:
-                _reject_unreviewed_bytecode(folder,patch['path'])
+                _reviewed_bytecode(folder,patch['path'])
                 expected=patch['targetSHA256']
         _canonical_relative(folder,item['path']); _check_path(folder,item['path'],required=True)
         if (folder/item['path']).stat().st_size>(128*1024*1024 if item['role']=='entry' else 8*1024*1024): raise APIError(409,'Reviewed code exceeds bound')
@@ -166,8 +206,11 @@ def verify_variant(folder,variant,*,save_paths=None,entries=None,export=False):
         if not hmac.compare_digest(actual,expected): raise APIError(409,'RenPy bootstrap/runtime/config fingerprint changed')
 
 
-def _reject_unreviewed_bytecode(folder,path):
+def _reviewed_bytecode(folder,path,approved=(),*,discard_regenerated=False):
     from .reviewed_profiles import _check_path
+    from .workflow import _entry_sha256
+    allowed = {item['path']: item['sha256'] for item in approved}
+    matched = []
     relative_path=PurePosixPath(path); parent=folder/relative_path.parent; stem=relative_path.stem
     for suffix in ('.pyc','.pyo'):
         candidate=parent/(stem+suffix)
@@ -180,17 +223,37 @@ def _reject_unreviewed_bytecode(folder,path):
             if count>10000: raise APIError(409,'Private runtime cache exceeds bound')
             name=item.name.casefold()
             if name.startswith(stem.casefold()+'.') and name.endswith(('.pyc','.pyo')):
-                raise APIError(409,'Unreviewed compiled runtime cache requires explicit private-cache review')
+                relative = item.relative_to(folder).as_posix()
+                expected = allowed.get(relative)
+                if expected is None:
+                    raise APIError(409,'Unreviewed compiled runtime cache requires explicit private-cache review')
+                _check_path(folder,relative,required=True)
+                if item.stat(follow_symlinks=False).st_size > 1024 * 1024 or (
+                    not discard_regenerated and not hmac.compare_digest(
+                        _entry_sha256(folder,dict(path=relative,backend='wine')),expected)
+                ):
+                    raise APIError(409,'Reviewed compiled runtime cache changed')
+                matched.append(item)
+    return matched
 
 
 def apply_export_patches(folder,variant,user,*,chown=os.chown):
     from .workflow import _canonical_relative,_entry_sha256
     for patch in variant.get('patches',[]):
-        _reject_unreviewed_bytecode(folder,patch['path'])
         _canonical_relative(folder,patch['path']); target=folder/patch['path']
         before=target.stat(follow_symlinks=False)
         actual=_entry_sha256(folder,dict(path=patch['path'],backend='wine'))
-        if actual==patch['targetSHA256']: continue
+        if actual not in (patch['sourceSHA256'],patch['targetSHA256']) or not stat.S_ISREG(before.st_mode):
+            raise APIError(409,'Private runtime differs; preserve it for explicit review')
+        # A successful game run may regenerate bytecode despite launcher flags.
+        # Discard only declared derived caches after exact private source validation;
+        # never execute them or relax verification of the original NAS source.
+        caches = _reviewed_bytecode(folder,patch['path'],patch.get('compiledCaches', ()),
+            discard_regenerated=actual==patch['targetSHA256'])
+        if actual==patch['targetSHA256']:
+            for cache in caches:
+                cache.unlink()
+            continue
         if actual!=patch['sourceSHA256'] or not stat.S_ISREG(before.st_mode): raise APIError(409,'Private runtime differs; preserve it for explicit review')
         data=base64.b64decode(patch['replacementBase64'],validate=True)
         temporary=target.with_name('.gameshelf-reviewed-'+uuid.uuid4().hex)
@@ -201,5 +264,67 @@ def apply_export_patches(folder,variant,user,*,chown=os.chown):
             current=target.stat(follow_symlinks=False)
             if (current.st_ino,current.st_size,current.st_mtime_ns)!=(before.st_ino,before.st_size,before.st_mtime_ns): raise APIError(409,'Private runtime changed during reviewed patch')
             os.replace(temporary,target)
+            for cache in caches:
+                cache.unlink()
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _allow_windows_image(path, *, entry=False):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as image:
+        info = os.fstat(image.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise APIError(409, 'Invalid Windows runtime image in account view')
+        if not entry:
+            header = image.read(64)
+            if len(header) != 64 or header[:2] != b'MZ':
+                return
+            offset = int.from_bytes(header[60:64], 'little')
+            if not 64 <= offset <= info.st_size - 4:
+                return
+            image.seek(offset)
+            if image.read(4) != b'PE\0\0':
+                return
+        if not info.st_mode & stat.S_IXUSR:
+            os.fchmod(image.fileno(), stat.S_IMODE(info.st_mode) | stat.S_IXUSR)
+
+
+def prepare_windows_entry(entry):
+    """Allow the launcher and its runtime PE modules in the private account view."""
+    _allow_windows_image(entry, entry=True)
+    directories = [entry.parent]
+    player = entry.parent / 'UnityPlayer.dll'
+    mono = entry.parent / 'MonoBleedingEdge'
+    runtime = mono / 'EmbedRuntime'
+    if not player.is_symlink() and player.is_file() and not mono.is_symlink():
+        if not runtime.is_symlink() and runtime.is_dir():
+            directories.append(runtime)
+    for directory in directories:
+        for module in directory.iterdir():
+            if module.suffix.lower() in {'.dll', '.pyd'} and not module.is_symlink() and module.is_file():
+                _allow_windows_image(module)
+
+
+def prepare_windows_images(folder, variant):
+    """Prepare Windows images in the private Ren'Py view."""
+    if variant['platform'] != 'windows':
+        return
+
+    def raise_walk_error(error):
+        raise error
+
+    entry = folder / variant['entryPath']
+    prepare_windows_entry(entry)
+
+    library = entry.parent / 'lib'
+    if library.is_symlink() or not library.is_dir():
+        return
+    for runtime in library.glob('py3-windows-*'):
+        if runtime.is_symlink() or not runtime.is_dir():
+            continue
+        for directory, _, files in os.walk(runtime, followlinks=False, onerror=raise_walk_error):
+            for name in files:
+                path = Path(directory) / name
+                if path.suffix.lower() in {'.exe', '.dll', '.pyd'} and not path.is_symlink():
+                    _allow_windows_image(path)

@@ -20,7 +20,7 @@ Windows App SDK is locked to stable `1.8.260921001`, including transitive hashes
 
 Build host uses SDK 10.0.103 with the .NET 10.0.14 servicing runtime in the same user tool directory. Intermittent native CLR crashes were observed inside compiler/MSBuild tasks on this host, including one after updating the servicing runtime; successful builds and the failed runs are recorded separately in private QA. No root cause or universal host fix is claimed.
 
-`Tools/bootstrap.ps1` installs the SDK and servicing runtime only into `%USERPROFILE%/GameShelfDev/dotnet`. `Tools/sync-build.py`, run from the repository root on Mac, copies only Windows sources into that user's development directory and invokes `Tools/remote-build.ps1` over the preconfigured `win` SSH alias. No NAS credentials are copied. It retrieves the project lock files. Logs and screenshots remain under ignored `Windows/build/`; the source archive excludes all build/QA output. Build output remains in that directory. Never install VS workloads, Windows SDK installers, services, or global runtimes without separate authorization.
+`Tools/bootstrap.ps1` installs the SDK and servicing runtime only into `D:/GameShelfDev/dotnet` by default. Set `GAMESHELF_BUILD_ROOT` to override the absolute workspace path. The build scripts also place temporary files and NuGet caches under this root. `Tools/sync-build.py`, run from the repository root on Mac, copies only Windows sources into that user's development directory and invokes `Tools/remote-build.ps1` over the preconfigured `win` SSH alias. No NAS credentials are copied. It retrieves the project lock files. Logs and screenshots remain under ignored `Windows/build/`; the source archive excludes all build/QA output. Build output remains in that directory. Never install VS workloads, Windows SDK installers, services, or global runtimes without separate authorization.
 
 ## Connection and isolation
 
@@ -32,7 +32,9 @@ Candidates load from server scan results immediately using `/api/library/candida
 
 Logical cards choose available Windows `.exe` entries only. Historical wire backend `wine` is accepted as a Windows executable, never passed to Wine. Helpers/settings/installers and unsafe paths are rejected. Metadata uses server CAS revisions; time uses bounded finite events with persistent stable UUIDs and retry-safe account outboxes. Existing personal snapshots are never imported. No cross-variant save sharing is advertised.
 
-Native launch requires a live matching account/canonical/edition lease, an account-only SMB view and a reviewed Windows save profile. Current v1 session metadata does **not** certify arbitrary Windows AppData/registry writes; see `Contracts/Windows-launch-support.md`. Unknown profiles are blocked and leases released. For reviewed profiles, the client maps the exact lease share with the exact API port and nonpersistent credentials supplied through stdin, starts in a Windows job before the first instruction, monitors descendants and heartbeats, then stops writers before removing its mapping/releasing the lease. It never rewrites system AppData or uses administrator shares.
+Connected native launch uses a matching account and edition lease, an account-only SMB overlay, and a Windows job that stops all writers before lease cleanup. Administrators on a supporting gateway can launch a published Windows executable through that overlay without a game-specific fingerprint. The overlay isolates relative writes and masks known seed-save paths. AppData and registry storage require separate runtime support. Ordinary shared accounts still require a reviewed save profile. See `Contracts/Windows-launch-support.md` for reviewed adapter details.
+
+Administrators who already open the NAS in File Explorer can select the corresponding mounted directory once in **Settings → Folders**. Game cards under that server root then launch their Windows executable through the existing Windows connection and continue recording account playtime. Root bindings are per device and account. Game-managed saves use their usual locations on this route. Without a root binding, the client uses the existing account-lease launch path.
 
 The window build and synthetic process tests do not certify isolation of a real game's saves. Do not remove this gate just because a game launches successfully.
 
@@ -47,6 +49,8 @@ The first connection page offers 本地使用. This uses the same library/sideba
 
 Standalone launching uses the existing Windows Job process monitor and records time only in LocalLibrary. These are ordinary Windows launches with their usual original save locations; **no account save isolation is claimed for standalone mode**. Connecting a server returns to the neutral address/login flow and never adopts, migrates or uploads the local catalog, metadata, time or saves. Switching while a local game is running is blocked.
 
+Build the fixture client with `dotnet build GameShelf.Windows -c UIAcceptance -p:Platform=x64` from the configured Windows build workspace. Both UI fixture scripts use this separate output and reserve `ui-local-data` and `ui-fixture-data` under the workspace for synthetic profiles. The Release publisher uses the separate Release output.
+
 `Tools/local-ui-acceptance.ps1` tests the real local choice, cached selection, harmless fixture EXE launch/save/time and neutral server return in its own development-only profile. It does not open a real NAS/game. The OS folder picker uses an HWND-bound WinUI/Windows native picker; live user folder contents are never used by the acceptance script.
 
 
@@ -56,7 +60,7 @@ Current server contract is documented in `Contracts/Windows-launch-support.md`. 
 
 The MIT Ren'Py 8.3.7 savelocation test fixture under Core.Tests/Fixtures is copied from the shared contract fixture with its original full notice retained; `.gitattributes` preserves its pinned bytes on Windows checkout. The client does not patch source games; the server verifies the exported reviewed patch.
 
-After successful real Windows tests/build, `Tools/publish-candidate.ps1` self-contained-publishes and overwrites exactly one private `%USERPROFILE%/GameShelfDev/artifacts/GameShelf-Windows-x64.zip`, excluding symbols/logs/private profiles and emitting its SHA256. This is a private review candidate, not a GitHub release or production install. The final frozen artifact path/checksum and true validation limits are recorded in `work/implementation/windows-report.md`.
+After successful real Windows tests/build, `Tools/publish-candidate.ps1` self-contained-publishes and overwrites exactly one private `D:/GameShelfDev/artifacts/GameShelf-Windows-x64.zip`, excluding symbols/logs/private profiles and emitting its SHA256. This is a private review candidate, not a GitHub release or production install. The final frozen artifact path/checksum and true validation limits are recorded in `work/implementation/windows-report.md`.
 
 
 Release delivery privacy: Directory.Build.props disables Release debug symbols/PDB emission and maps build source roots to a neutral path. The publisher must run `Tools/audit-candidate.ps1` successfully before emitting a candidate digest. This is a full byte-content audit of every ZIP file in UTF-8/UTF-16LE/UTF-16BE, including builder-home/username markers; omitting PDB filenames alone is insufficient. A failed audit deletes the candidate. The private audit JSON is kept beside the remote ZIP, never included in the archive.

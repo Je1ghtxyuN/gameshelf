@@ -37,6 +37,33 @@ class UnifiedHTTPTests(unittest.TestCase):
         status,session,_=self.call('POST',f'/api/library/games/{gid}/session',dict(variantID=gid,deviceID='new'),player)
         self.assertEqual(status,200); self.assertTrue(session['profileKey'].endswith('/'+gid))
 
+    def test_windows_smb_route_preserves_default_and_lease_authority(self):
+        root=self.s.add_root(str(self.source),'Fixture'); self.s.scan(root['id'])
+        game=self.s.publish(self.s.candidates()[0]['id'])['id']
+        self.s.grant(self.user['id'],game,True)
+        path=f'/api/library/games/{game}/session'
+        body=dict(variantID=game,deviceID='fixture')
+        header={'X-GameShelf-Client-Platform':'windows'}
+        self.assertEqual(self.call('POST',path,body,extra=header)[0],401)
+        original_open=self.s.driver.open
+        self.s.driver.open=lambda *args, **kwargs: dict(original_open(*args, **kwargs), port=1445)
+        from gameshelf_server.__main__ import Settings
+        for override in ('192.168.2.30','100.64.12.34'):
+            cfg=Settings.from_env(dict(GAMESHELF_SOURCE_ROOTS='["/games"]',
+                GAMESHELF_SMB_HOST='games.example.invalid',GAMESHELF_WINDOWS_SMB_HOST=override))
+            self.server.application.windows_smb_host=cfg.windows_smb_host
+            for route, data, headers, endpoint in (
+                (path,body,None,('localhost',1445)),
+                (path,body,header,(override,445)),
+                (path,body,{'X-GameShelf-Client-Platform':'192.168.2.99'},('localhost',1445)),
+                (f'/api/games/{game}/session',dict(deviceID='legacy'),header,('localhost',1445)),
+            ):
+                status,lease,_=self.call('POST',route,data,self.token,extra=headers)
+                self.assertEqual(status,200)
+                self.assertEqual((lease['share']['host'],lease['share']['port']),endpoint)
+                self.assertEqual(lease['userID'],self.user['id'])
+                self.assertEqual(self.call('DELETE',f'/api/sessions/{lease["leaseID"]}',token=self.token)[0],200)
+
     def test_account_candidate_flags_and_ignore_over_http(self):
         root=self.s.add_root(str(self.source),'Fixture')
         self.s.scan(root['id'])
@@ -104,3 +131,42 @@ class UnifiedHTTPTests(unittest.TestCase):
         self.assertEqual(self.call('POST',route,dict(body,enabled=False),self.owner_token)[0],409)
         self.assertEqual(self.call('DELETE',f'/api/library/games/{game}',token=self.token)[0],409)
         self.assertEqual(self.call('DELETE',f'/api/sessions/{lease["leaseID"]}',token=self.token)[0],200)
+
+    def test_smb_enrollment_routes_are_opt_in_and_account_scoped(self):
+        from gameshelf_server.smb_enrollment import SMBEnrollment, SMBEnrollmentAPI
+        prefix = '/api/account/smb-enrollment'
+        self.assertEqual(self.call('GET',prefix,token=self.token)[0],404)
+        proofs = {}
+
+        class Host:
+            def resolve(self, username):
+                return 'verified:'+username
+
+            def deliver(self, principal, challenge, proof):
+                proofs[challenge] = (principal,proof)
+
+            def discard(self, challenge):
+                proofs.pop(challenge,None)
+
+            def provision(self, account, principal):
+                return 'workspace-'+account[:8]
+
+        self.s.smb_enrollment_api = SMBEnrollmentAPI(SMBEnrollment(self.s.db),Host(),'verify-nas')
+        self.assertEqual(self.call('GET',prefix)[0],401)
+        self.assertEqual(self.call('POST',prefix+'/workspace',{},self.token)[0],409)
+        code, body, _ = self.call('POST',prefix+'/challenge',dict(username='member'),self.token)
+        self.assertEqual(code,200)
+        challenge = body['challengeID']
+        self.assertEqual(body,dict(challengeID=challenge,share='verify-nas',filename=challenge+'.proof'))
+        proof = proofs[challenge][1]
+        payload = dict(challengeID=challenge,proof=proof)
+        self.assertEqual(self.call('POST',prefix+'/proof',payload,self.owner_token)[0],403)
+        self.assertEqual(self.call('POST',prefix+'/proof',payload,self.token)[0],200)
+        self.assertNotIn(challenge,proofs)
+        self.assertEqual(self.call('GET',prefix,token=self.token)[1],dict(state='verified'))
+        self.assertEqual(self.call('POST',prefix+'/proof',payload,self.token)[0],403)
+        code, ready, _ = self.call('POST',prefix+'/workspace',{},self.token)
+        self.assertEqual(code,200)
+        self.assertEqual(ready,dict(state='ready',share='workspace-'+self.user['id'][:8]))
+        self.assertEqual(self.call('GET',prefix,token=self.token)[1],ready)
+        self.assertEqual(self.call('GET',prefix,token=self.owner_token)[1],dict(state='unverified'))

@@ -37,6 +37,12 @@ class UnifiedLibrary:
             variant_id TEXT PRIMARY KEY REFERENCES games(id),
             canonical_id TEXT NOT NULL REFERENCES games(id));
         CREATE INDEX IF NOT EXISTS library_canonical ON library_variants(canonical_id);
+        CREATE TABLE IF NOT EXISTS library_shared_editions(
+            game_id TEXT PRIMARY KEY REFERENCES games(id));
+        CREATE VIEW IF NOT EXISTS library_access AS
+            SELECT g.user_id,g.game_id FROM grants g JOIN users u ON u.id=g.user_id WHERE u.disabled=0
+            UNION
+            SELECT u.id,shared.game_id FROM users u CROSS JOIN library_shared_editions shared WHERE u.disabled=0;
         CREATE TABLE IF NOT EXISTS library_metadata(
             user_id TEXT REFERENCES users(id), canonical_id TEXT REFERENCES games(id),
             revision INTEGER NOT NULL DEFAULT 0, title TEXT, favorite INTEGER NOT NULL DEFAULT 0,
@@ -78,10 +84,13 @@ class UnifiedLibrary:
 
     def _library_permitted(self,user,canonical):
         self._sync_variants()
-        if not self.db.execute('''SELECT 1 FROM library_variants v JOIN grants g ON g.game_id=v.variant_id
+        if not self.db.execute('''SELECT 1 FROM library_variants v JOIN library_access g ON g.game_id=v.variant_id
             JOIN users u ON u.id=g.user_id WHERE v.canonical_id=? AND g.user_id=? AND u.disabled=0''',
             (canonical,user['id'])).fetchone():
             raise APIError(403,'Game not granted')
+
+    def _family_windows_workspace(self):
+        return self.direct_nas and callable(getattr(self.driver,'prepare_generic_windows_entry',None))
 
     def _library_game(self,user,canonical):
         self._library_permitted(user,canonical)
@@ -90,12 +99,18 @@ class UnifiedLibrary:
         total,last=self.db.execute('SELECT COALESCE(SUM(elapsed),0),MAX(ended) FROM library_time_events WHERE user_id=? AND canonical_id=?',(user['id'],canonical)).fetchone()
         variants=[]
         for row in self.db.execute('''SELECT games.* FROM games JOIN library_variants v ON v.variant_id=games.id
-            JOIN grants g ON g.game_id=games.id WHERE v.canonical_id=? AND g.user_id=? ORDER BY games.id''',(canonical,user['id'])):
+            JOIN library_access g ON g.game_id=games.id WHERE v.canonical_id=? AND g.user_id=? ORDER BY games.id''',(canonical,user['id'])):
             entries=json.loads(row['entries'])
             scanned=self.db.execute('SELECT available,signature FROM candidates WHERE id=?',(row['candidate_id'],)).fetchone()
             available=bool(scanned and scanned['available'] and scanned['signature']==row['signature'])
             # One published edition can contain multiple platform entrances.
             # Repeated variant ID denotes the same immutable physical edition.
+            binding=self.db.execute('SELECT canonical_id,source_signature FROM save_namespace_variants WHERE variant_id=?',(row['id'],)).fetchone()
+            mz_sync=getattr(self.driver,'mz_sync',None)
+            requires_workspace=((self.direct_nas and bool(json.loads(row['save_paths'])))
+                or binding is not None
+                or row['id'] in getattr(mz_sync,'edition_ids',())
+                or self.db.execute('SELECT 1 FROM reviewed_launch_optins WHERE game_id=?',(row['id'],)).fetchone() is not None)
             groups={}
             for entry in entries:
                 platform=entry_platform(entry,native_app_root=self._native_app_root(row))
@@ -103,8 +118,14 @@ class UnifiedLibrary:
                 groups.setdefault(platform,[]).append(entry)
             for platform,items in groups.items():
                 variant=dict(id=row['id'],platform=platform,entries=items,available=available)
+                family_windows=platform == 'windows' and self._family_windows_workspace()
+                if requires_workspace or family_windows:
+                    variant['requiresAccountWorkspace']=True
+                    if family_windows:
+                        variant['familyWindowsOverlay']=True
+                elif (self.direct_nas and platform in ('windows', 'macos')) or (user['admin'] and platform == 'windows'):
+                    variant['nasSource']=dict(rootID=row['root_id'],relative=row['relative'])
                 if row['edition_label']: variant['label']=row['edition_label']
-                binding=self.db.execute('SELECT canonical_id,source_signature FROM save_namespace_variants WHERE variant_id=?',(row['id'],)).fetchone()
                 if binding and binding['canonical_id']==canonical and binding['source_signature']==row['signature']:
                     namespace=self.db.execute('SELECT compatibility_key FROM canonical_save_namespaces WHERE canonical_id=?',(canonical,)).fetchone()
                     if namespace: variant['saveCompatibilityKey']=namespace[0]
@@ -205,15 +226,30 @@ class UnifiedLibrary:
     @locked
     def library(self,user):
         self._sync_variants()
-        ids=[r[0] for r in self.db.execute('SELECT DISTINCT canonical_id FROM library_variants JOIN grants ON game_id=variant_id WHERE user_id=? ORDER BY canonical_id',(user['id'],))]
-        return dict(schemaVersion=2,serverID=self.server_id,user={k:user[k] for k in ('id','username','admin')},
-                    games=[self._library_game(user,g) for g in ids],collections=self._collections(user))
+        ids=[r[0] for r in self.db.execute('SELECT DISTINCT canonical_id FROM library_variants JOIN library_access ON game_id=variant_id WHERE user_id=? ORDER BY canonical_id',(user['id'],))]
+        result = dict(schemaVersion=2,serverID=self.server_id,user={k:user[k] for k in ('id','username','admin')},
+                    games=[self._library_game(user,g) for g in ids],collections=self._collections(user),
+                    directNas=self.direct_nas,
+                    ownerWindowsOverlay=bool(user['admin'] and callable(getattr(self.driver,'prepare_generic_windows_entry',None))))
+        if getattr(self, 'smb_enrollment_api', None) is not None:
+            result['smbEnrollmentAvailable'] = True
+        exports = getattr(self.driver, 'workspace_exports', None)
+        if self.direct_nas and exports is not None and user['id'] in exports.shares:
+            result['mountedWorkspaceShare'] = exports.shares[user['id']]
+        return result
 
     @locked
     def library_remove(self,user,canonical,data):
         fields(data,())
         if self._canonical(canonical)!=canonical:
             raise APIError(409,'Remove requires the canonical game ID')
+        if self.db.execute("""SELECT 1 FROM library_shared_editions s
+            JOIN library_variants v ON v.variant_id=s.game_id WHERE v.canonical_id=?""",(canonical,)).fetchone():
+            self._require_library_admin(user)
+            self._profile_edit_idle(canonical)
+            self.db.execute("""DELETE FROM library_shared_editions WHERE game_id IN
+                (SELECT variant_id FROM library_variants WHERE canonical_id=?)""",(canonical,))
+            return {}
         self._assert_no_migration(user['id'],canonical)
         # Do not reap, revoke or touch a view here. Even expired/opening/revoking
         # writers must be closed explicitly before removing this account card.
@@ -325,7 +361,7 @@ class UnifiedLibrary:
         self._require_library_admin(user)
         added={r[0] for r in self.db.execute('''SELECT DISTINCT c.id FROM candidates c
             JOIN games e ON e.candidate_id=c.id AND e.signature=c.signature
-            JOIN grants g ON g.game_id=e.id WHERE g.user_id=?''',(user['id'],))}
+            JOIN library_access g ON g.game_id=e.id WHERE g.user_id=?''',(user['id'],))}
         ignored={r[0] for r in self.db.execute(
             'SELECT candidate_id FROM library_candidate_ignores WHERE user_id=?',(user['id'],))}
         return dict(candidates=[dict(c,added=c['id'] in added,ignored=c['id'] in ignored)
@@ -428,7 +464,11 @@ class UnifiedLibrary:
         self.db.execute('BEGIN IMMEDIATE')
         try:
             editions=[self._commit_publication(*plan)['id'] for plan in plans]
-            for edition in editions: self.grant(target,edition,True)
+            if self.direct_nas:
+                self.db.executemany('INSERT OR IGNORE INTO library_shared_editions VALUES (?)',
+                                    [(edition,) for edition in editions])
+            else:
+                for edition in editions: self.grant(target,edition,True)
             for (row,_,_),edition in zip(plans,editions):
                 if row['id'] in choices:
                     self._store_launch_preference(target,self._canonical(edition),selected_platforms[row['id']],edition,choices[row['id']])
@@ -444,7 +484,7 @@ class UnifiedLibrary:
 
     @locked
     def library_session(self,user,canonical,data,*,token=None):
-        fields(data,('variantID','deviceID'),('saveCompatibilityKey','adapter'))
+        fields(data,('variantID','deviceID'),('saveCompatibilityKey','adapter','windowsEntry','mountedWorkspace'))
         self._library_permitted(user,canonical)
         if self._canonical(data['variantID'])!=canonical: raise APIError(403,'Variant does not belong to game')
         if 'saveCompatibilityKey' in data:
@@ -452,4 +492,10 @@ class UnifiedLibrary:
             namespace=self._namespace_for_game(user,game,canonical)
             if not namespace or data['saveCompatibilityKey']!=namespace['compatibilityKey']:
                 raise APIError(409,'Cross-variant save sharing unavailable or incompatible: reviewed namespace key required')
-        return self.session(user,data['variantID'],data['deviceID'],token=token,adapter=data.get('adapter'))
+        if 'windowsEntry' in data:
+            entry_path(data['windowsEntry'])
+        mounted = data.get('mountedWorkspace', False)
+        if type(mounted) is not bool:
+            raise APIError(400, 'mountedWorkspace must be a boolean')
+        return self.session(user,data['variantID'],data['deviceID'],token=token,adapter=data.get('adapter'),
+                            windows_entry=data.get('windowsEntry'),mounted_workspace=mounted)

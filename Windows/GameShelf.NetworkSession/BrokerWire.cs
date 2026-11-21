@@ -5,12 +5,14 @@ using GameShelf.Core;
 namespace GameShelf.NetworkSession;
 public enum BrokerCommand { Connect,Start,Status,Renew,Stop,Disconnect }
 public enum BrokerStage { Protocol,Identity,Context,Connect,Review,Start,Renew,Stop,Disconnect,Deadline,Transport,Package }
-public sealed class BrokerFailure(BrokerStage stage,int? nativeCode=null):InvalidOperationException($"Windows network session failed: {stage}"+(nativeCode is int n?$" ({n})":""))
-{ public BrokerStage Stage{get;}=stage;public int? NativeCode{get;}=nativeCode; }
+public sealed class BrokerFailure(BrokerStage stage,int? nativeCode=null,SmbOperationStage? smbStage=null,bool? mappingNotAttempted=null):InvalidOperationException($"Windows network session failed: {stage}"+(smbStage is { } smb?$" / SMB {smb}":"")+(nativeCode is int n?$" ({n})":""))
+{ public BrokerStage Stage{get;}=stage;public int? NativeCode{get;}=nativeCode;
+    public SmbOperationStage? SmbStage { get; } = smbStage;
+    public bool? MappingNotAttempted { get; } = mappingNotAttempted; }
 public sealed record BrokerStatus(bool Started,bool Exited,bool NativeStopped,bool MappingGone);
 public sealed record BrokerRequest(int Version,Guid Operation,long Sequence,BrokerCommand Command,WindowsLeaseContext? Context=null,string? LeaseID=null,double? ExpiresAt=null)
 { public override string ToString()=>"Broker request (redacted)"; }
-public sealed record BrokerReply(int Version,Guid Operation,long Sequence,BrokerCommand Command,bool Success,BrokerStage? Error=null,int? NativeCode=null,BrokerStatus? Status=null);
+public sealed record BrokerReply(int Version,Guid Operation,long Sequence,BrokerCommand Command,bool Success,BrokerStage? Error=null,int? NativeCode=null,BrokerStatus? Status=null,SmbOperationStage? SmbStage=null,bool? MappingNotAttempted=null);
 public static class BrokerWire
 {
     public const int Limit=32768;

@@ -1,7 +1,9 @@
 ﻿$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
-$dev=Join-Path $env:USERPROFILE 'GameShelfDev'
+. (Join-Path $PSScriptRoot 'build-environment.ps1')
 $src=Join-Path $dev 'src/Windows'
+$app=Join-Path $src 'GameShelf.Windows/bin/x64/UIAcceptance/net10.0-windows10.0.19041.0/win-x64/GameShelf.Windows.exe'
+if(-not (Test-Path -LiteralPath $app -PathType Leaf)){throw 'Build GameShelf.Windows with -c UIAcceptance before running this fixture.'}
 $profile=Join-Path $dev 'ui-local-data'
 $source=Join-Path $dev 'ui-local-sources/Local Fixture Game'
 New-Item -ItemType Directory -Force $source | Out-Null
@@ -11,13 +13,10 @@ Copy-Item (Join-Path $src 'GameShelf.Windows/Assets/AppIcon.png') (Join-Path $so
 # Only reset this synthetic test profile, never the user's actual app data.
 if(Test-Path $profile){Remove-Item $profile -Recurse -Force}
 $dotnet=Join-Path $dev 'dotnet/dotnet.exe'
-$env:DOTNET_ROOT=Join-Path $dev 'dotnet'
 & $dotnet (Join-Path $src 'GameShelf.UiFixture/bin/Release/net10.0/GameShelf.UiFixture.dll') --seed-local $profile (Join-Path $dev 'ui-local-sources')
 if($LASTEXITCODE -ne 0){throw 'Local fixture cache seed failed'}
-$app=Join-Path $src 'GameShelf.Windows/bin/x64/Release/net10.0-windows10.0.19041.0/win-x64/GameShelf.Windows.exe'
 $p=Start-Process $app -ArgumentList ('"--data-dir='+$profile+'"') -PassThru
 try {
- Start-Sleep -Seconds 5;$p.Refresh()
  Add-Type -AssemblyName UIAutomationClient
  Add-Type -AssemblyName UIAutomationTypes
  Add-Type -AssemblyName System.Drawing
@@ -33,7 +32,16 @@ public static class LocalCapture {
 }
 '@
  [LocalCapture]::SetThreadDpiAwarenessContext([IntPtr](-4))|Out-Null
- $root=[Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+ $deadline=[DateTime]::UtcNow.AddSeconds(20)
+ do {
+  $p.Refresh()
+  if($p.HasExited){throw "Local fixture app exited: $($p.ExitCode)"}
+  $window=$p.MainWindowHandle
+  if($window -ne [IntPtr]::Zero){break}
+  Start-Sleep -Milliseconds 250
+ } while([DateTime]::UtcNow -lt $deadline)
+ if($window -eq [IntPtr]::Zero){throw 'Local fixture window did not open within 20 seconds'}
+ $root=[Windows.Automation.AutomationElement]::FromHandle($window)
  function Find-ID($id){return $root.FindFirst([Windows.Automation.TreeScope]::Descendants,(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::AutomationIdProperty,$id)))}
  function Find-Name($name){return $root.FindFirst([Windows.Automation.TreeScope]::Descendants,(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,$name)))}
  function Click($name){$e=Find-Name $name;if($null -eq $e){throw "Missing $name"};$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()}

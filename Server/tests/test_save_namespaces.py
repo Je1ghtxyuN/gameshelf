@@ -14,13 +14,21 @@ class SaveNamespaceTests(unittest.TestCase):
     denied=test_unified_library.UnifiedLibraryTests.denied
     library=test_unified_library.UnifiedLibraryTests.library
 
-    def reviewed(self):
+    def reviewed(self, seed_path=None, edition_only=False):
         mac,win,manifest=setup_sources(self)
+        if seed_path:
+            (win/seed_path).write_bytes(b"source seed must remain private")
+        mac_rules=manifest['profiles'][0]['variants'][0]['savePaths']
+        if edition_only:
+            profile=manifest['profiles'][0]
+            profile['scope']='edition'
+            profile['variants']=profile['variants'][1:]
+            (self.s.state/'reviewed-renpy-profiles.json').write_text(json.dumps(manifest))
         old=self.s; self.s=Service(old.state,NamespaceDriver(old.state),[self.source],clock=lambda:self.now)
         self.addCleanup(self.s.close); old.close(); self.driver=self.s.driver; self.app=Application(self.s)
         self.s.register_selected(self.root['id'],dict(games=[dict(relative=mac.name,entryPath='.'),dict(relative=win.name,entryPath='Play.exe')]),authorize=lambda:self.app.require_admin(self.at))
         candidates={r['relative']:r for r in self.s.candidates()}
-        mg=self.s.publish(candidates[mac.name]['id'],save_paths=manifest['profiles'][0]['variants'][0]['savePaths'])['id']
+        mg=self.s.publish(candidates[mac.name]['id'],save_paths=mac_rules)['id']
         wg=self.s.publish(candidates[win.name]['id'])['id']
         self.request('POST',f'/api/admin/library/games/{mg}/variants',dict(variantIDs=[wg]),self.at)
         for user in (self.a,self.b):
@@ -53,6 +61,14 @@ class SaveNamespaceTests(unittest.TestCase):
         self.assertTrue(second['profileKey'].endswith('/'+win))
         variants=self.library()['games'][0]['variants']; self.assertEqual({v['saveCompatibilityKey'] for v in variants},{KEY})
 
+    def test_family_nas_keeps_reviewed_editions_on_the_account_workspace(self):
+        mac,win,_=self.reviewed()
+        self.s.direct_nas=True
+        self.activate(mac,[mac,win])
+        after=self.library()['games'][0]['variants']
+        self.assertTrue(all(v['requiresAccountWorkspace'] for v in after))
+        self.assertTrue(all('nasSource' not in v for v in after))
+
     def test_nonempty_legacy_saves_and_reserved_target_preserved_409(self):
         mac,win,_=self.reviewed(); self.activate(mac,[mac,win])
         upper=self.driver.upper(self.a['id'],win); save=upper/'game/saves/slot.save'; save.parent.mkdir(parents=True); save.write_bytes(b'old private progress')
@@ -61,6 +77,18 @@ class SaveNamespaceTests(unittest.TestCase):
         save.unlink(); reserved=upper/RELATIVE/'existing.save'; reserved.parent.mkdir(parents=True); reserved.write_bytes(b'prior reserved data')
         self.denied(lambda:self.s.session(self.a,win,'win',adapter='renpy-savedir-v1'),409)
         self.assertEqual(reserved.read_bytes(),b'prior reserved data')
+
+    def test_detected_seed_file_inside_reviewed_directory_does_not_block_namespace(self):
+        mac,win,_=self.reviewed(seed_path='game/saves/seed.save')
+        self.activate(mac,[win])
+        lease=self.s.session(self.a,win,'reviewed win',adapter='renpy-savedir-v1')
+        self.assertEqual(lease['saveNamespace']['reviewedProfileID'],PROFILE)
+        self.s.release(self.a,lease['leaseID'])
+
+    def test_detected_seed_file_outside_reviewed_directory_still_blocks_namespace(self):
+        mac,win,_=self.reviewed(seed_path='game/unreviewed.save')
+        self.denied(lambda:self.activate(mac,[win]),409)
+        self.assertEqual(self.driver.active,{})
 
     def test_no_optin_unknown_profiles_unreviewed_editions_and_key_bypass(self):
         mac,win,_=self.reviewed()
@@ -80,6 +108,34 @@ class SaveNamespaceTests(unittest.TestCase):
         self.denied(lambda:self.s.session(self.a,win,'tampered',adapter='renpy-savedir-v1'),409)
         catalog=self.s.state/'reviewed-renpy-profiles.json'; catalog.chmod(0o644)
         with self.assertRaises(Exception): Service(self.s.state,self.driver,[self.source])
+
+    def test_edition_only_namespace_preserves_linked_mac_workspace(self):
+        mac,win,_=self.reviewed(edition_only=True)
+        upper=self.driver.upper(self.a['id'],mac)
+        old=upper/'old-progress.save'
+        upper.mkdir(parents=True)
+        old.write_bytes(b'legacy progress')
+        self.denied(lambda:self.activate(mac,[mac,win]),400)
+        self.activate(mac,[win])
+        self.activate(mac,[win])
+        lease=self.s.session(self.a,win,'windows',adapter='renpy-savedir-v1')
+        self.assertEqual(lease['saveNamespace']['reviewedProfileID'],PROFILE)
+        self.s.release(self.a,lease['leaseID'])
+        self.denied(lambda:self.s.library_session(self.a,mac,dict(
+            variantID=mac,deviceID='mac',saveCompatibilityKey=KEY,adapter='renpy-savedir-v1')),409)
+        lease=self.s.session(self.a,mac,'mac')
+        self.assertNotIn('saveNamespace',lease)
+        self.assertEqual(old.read_bytes(),b'legacy progress')
+        self.s.release(self.a,lease['leaseID'])
+
+    def test_edition_only_namespace_still_rejects_its_own_unmigrated_saves(self):
+        mac,win,_=self.reviewed(edition_only=True)
+        self.activate(mac,[win])
+        old=self.driver.upper(self.a['id'],win)/'game/saves/slot.save'
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b'legacy windows save')
+        self.denied(lambda:self.s.session(self.a,win,'windows',adapter='renpy-savedir-v1'),409)
+        self.assertEqual(old.read_bytes(),b'legacy windows save')
 
     def test_unknown_old_edition_workspace_never_silently_opens_blank_namespace(self):
         mac,win,_=self.reviewed()

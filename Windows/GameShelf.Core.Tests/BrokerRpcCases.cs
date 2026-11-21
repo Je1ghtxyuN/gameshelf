@@ -16,6 +16,24 @@ static class BrokerRpcCases
     public static async Task CorrelationPoisons(){var op=Guid.NewGuid();var stream=new ScriptStream(BrokerWire.Encode(new BrokerReply(1,op,99,BrokerCommand.Status,true,Status:new(true,true,true,true))));var rpc=new BrokerRpc(stream,op);try{await rpc.Call(BrokerCommand.Status,CancellationToken.None);throw new Exception();}catch(BrokerFailure){}Check(stream.Closed);long before=stream.Written.Length;try{await rpc.Call(BrokerCommand.Disconnect,CancellationToken.None);throw new Exception();}catch(BrokerFailure){}Check(before==stream.Written.Length);}
     public static async Task CancelAfterWritePoisons(){var op=Guid.NewGuid();using var cancel=new CancellationTokenSource();var stream=new ScriptStream([]){AfterWrite=()=>cancel.Cancel()};var rpc=new BrokerRpc(stream,op);try{await rpc.Call(BrokerCommand.Status,cancel.Token);throw new Exception();}catch(BrokerFailure){}Check(stream.Closed&&stream.Written.Length>0);}
     public static async Task CancelBeforeWritePreserves(){using var cancel=new CancellationTokenSource();cancel.Cancel();var stream=new ScriptStream([]);var rpc=new BrokerRpc(stream,Guid.NewGuid());try{await rpc.Call(BrokerCommand.Status,cancel.Token);throw new Exception();}catch(OperationCanceledException){}Check(!stream.Closed&&stream.Written.Length==0);}
+    public static async Task MappingFailureEvidence()
+    {
+        foreach (bool preMap in new[] { true, false })
+        {
+            var operation = Guid.NewGuid();
+            var stage = preMap ? SmbOperationStage.Preflight : SmbOperationStage.Create;
+            using var stream = new ScriptStream(BrokerWire.Encode(new BrokerReply(
+                1, operation, 1, BrokerCommand.Connect, false, BrokerStage.Connect, 67,
+                SmbStage: stage, MappingNotAttempted: preMap)));
+            var rpc = new BrokerRpc(stream, operation);
+            try { await rpc.Call(BrokerCommand.Connect, CancellationToken.None); throw new Exception(); }
+            catch (BrokerFailure failure) when (failure.Stage == BrokerStage.Connect)
+            {
+                Check(failure.NativeCode == 67 && failure.SmbStage == stage
+                    && failure.MappingNotAttempted == preMap && !stream.Closed);
+            }
+        }
+    }
     public static async Task NegativeAllowsDisconnect(){var op=Guid.NewGuid();var one=BrokerWire.Encode(new BrokerReply(1,op,1,BrokerCommand.Start,false,BrokerStage.Review));var two=BrokerWire.Encode(new BrokerReply(1,op,2,BrokerCommand.Disconnect,true,Status:new(false,false,true,true)));var stream=new ScriptStream(one.Concat(two).ToArray());var rpc=new BrokerRpc(stream,op);try{await rpc.Call(BrokerCommand.Start,CancellationToken.None);throw new Exception();}catch(BrokerFailure e)when(e.Stage==BrokerStage.Review){}Check(!stream.Closed);Check((await rpc.Call(BrokerCommand.Disconnect,CancellationToken.None)).MappingGone&&!stream.Closed);}    public static async Task ConcurrentStatusRenew(){var op=Guid.NewGuid();var a=BrokerWire.Encode(new BrokerReply(1,op,1,BrokerCommand.Status,true,Status:new(true,false,false,false)));var b=BrokerWire.Encode(new BrokerReply(1,op,2,BrokerCommand.Renew,true,Status:new(true,false,false,false)));var stream=new ScriptStream(a.Concat(b).ToArray()){ReadDelay=20};var rpc=new BrokerRpc(stream,op);var one=rpc.Call(BrokerCommand.Status,CancellationToken.None);var two=rpc.Call(BrokerCommand.Renew,CancellationToken.None,lease:new string('4',32),expires:1234567890);await Task.WhenAll(one,two);stream.Written.Position=0;var first=await BrokerWire.Read<BrokerRequest>(stream.Written,CancellationToken.None);var second=await BrokerWire.Read<BrokerRequest>(stream.Written,CancellationToken.None);Check(first.Sequence==1&&first.Command==BrokerCommand.Status&&second.Sequence==2&&second.Command==BrokerCommand.Renew&&!stream.Closed);}
 
 }

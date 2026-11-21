@@ -12,6 +12,7 @@ run_swift() {
  local sources=("$@")
  case " $* " in *" Sources/Runtime.swift "*) sources+=(Sources/WineRenderCachePolicy.swift);; esac
   case " $* " in *" Sources/UnityCursorAdapter.swift "*) sources+=(Sources/UnityInputAssetPatch.swift);; esac
+ case " $* " in *" Sources/NativeAppCache.swift "*) sources+=(Sources/NativeVolumePolicy.swift);; esac
  case " $* " in *" Sources/Core.swift "*) sources+=(Sources/VisualNovelProbe.swift);; esac
  case " $* " in *" Sources/SharedLibrary.swift "*) sources+=(Sources/PinnedHTTP.swift);; esac
  swiftc -swift-version 5 -module-cache-path build/module-cache "${sources[@]}" "Tests/${name}Tests.swift" -o "build/${name}Tests"
@@ -50,6 +51,7 @@ run_swift PlaytimeRecorder Sources/PlaytimeStore.swift Sources/PlaytimeRecorder.
 run_swift AccountLibrary Sources/Core.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift
 run_swift AccountLibraryPersistence Sources/Core.swift Sources/SharedScanSelection.swift Sources/PlaytimeStore.swift Sources/AccountLibrary.swift Sources/AccountLibraryPersistence.swift
 run_swift AccountMetadataSync Sources/Core.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/AccountMetadataSync.swift
+run_swift DirectNASBinding Sources/Core.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/SharedEntryFingerprint.swift Sources/NativeAppIdentity.swift Sources/DirectNASBinding.swift -framework AppKit
 run_swift AccountLibraryMigration Sources/Core.swift Sources/LibraryDiscovery.swift Sources/SharedLibrary.swift Sources/PersonalLibrary.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/AccountLibraryMigration.swift Sources/AccountOwnerTransition.swift
 run_swift AccountOwnerTransition Sources/Core.swift Sources/LibraryDiscovery.swift Sources/SharedLibrary.swift Sources/PersonalLibrary.swift Sources/SharedScanSelection.swift Sources/AccountLibrary.swift Sources/AccountLibraryMigration.swift Sources/AccountOwnerTransition.swift
 

@@ -195,6 +195,8 @@ class OwnerMigrationCoordinator:
         profile = self.s.save_profiles.get(m['reviewedProfileID'])
         if not profile or profile['evidenceSHA256'] != m['evidenceSHA256']:
             _fail('Trusted reviewed RenPy evidence required')
+        if profile.get('scope') == 'edition':
+            _fail('Edition-only profiles do not support canonical owner migration')
         variant = next((v for v in profile['variants'] if v['id'] == m['profileVariantID']), None)
         if not variant:
             _fail('Exact reviewed RenPy variant required')

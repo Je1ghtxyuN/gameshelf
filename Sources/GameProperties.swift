@@ -202,7 +202,11 @@ final class GamePropertiesController: NSWindowController, NSWindowDelegate {
    if let shared=game.shared {
     section("游戏来源",value:"共享游戏库")
     if let connection=try? SharedConnectionStore(root:app.root).connections.first(where:{$0.id==shared.connectionID}){section("服务器与账号",value:connection.name+" · "+connection.username)}
-    add(text("游戏资源通过网络读取，存档与配置使用此账号的独立空间。",secondary:true))
+    if app.directNASPreviewEnabled {
+     add(text("此预览使用本机绑定的 NAS 资料夹；存档与配置由游戏管理。", secondary: true))
+    } else {
+     add(text("游戏资源通过网络读取，存档与配置使用此账号的独立空间。",secondary:true))
+    }
    }
    let separator = NSBox(); separator.boxType = .separator; add(separator)
    add(text("从游戏库移除后，原游戏、本地副本、运行环境与存档均保留。", secondary: true))
@@ -252,6 +256,16 @@ final class GamePropertiesController: NSWindowController, NSWindowDelegate {
     }
    }
   case 2:
+   if game.shared != nil && app.directNASPreviewEnabled {
+    section("本机 NAS 绑定", value: app.directNASBindingStatus(game))
+    add(text("从已挂载的资料夹直接运行。请一次只在一台设备游玩；存档位置由游戏决定，GameShelf 不同步存档。", secondary: true))
+    button("选择 NAS 游戏资料夹…", enabled: !blocked && !running && app.canBindDirectNAS(game)) { [weak self] in
+     self?.perform(requireStopped: true) { app, game in
+      app.chooseDirectNASFolder(game) { [weak self] in self?.refresh() }
+     }
+    }
+    break
+   }
    section("原始位置（NAS 或导入目录）", value: game.originalFolder)
    section(game.entry.backend == .native ? "游戏资源位置":"当前运行位置", value: game.folder)
    if game.entry.backend == .native {
@@ -262,7 +276,9 @@ final class GamePropertiesController: NSWindowController, NSWindowDelegate {
    if game.shared == nil {
     section("本地副本位置", value: local)
     add(text(game.folder == local ? "当前使用本地副本。" : "当前引用游戏目录；下载会复制到本地并切换运行位置，保留原件。", secondary: true))
-   }else{add(text("游戏在启动时挂载到此位置。大资源保留在服务器；个人写入由服务器独立保存。",secondary:true))}
+   } else {
+    add(text("游戏在启动时挂载到此位置。大资源保留在服务器；个人写入由服务器独立保存。", secondary: true))
+   }
    button("在 Finder 中显示当前目录") { [weak self] in
     guard let game = self?.game else { return }
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: game.folder)])

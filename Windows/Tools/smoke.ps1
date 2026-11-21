@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
-$dev=Join-Path $env:USERPROFILE 'GameShelfDev'
+. (Join-Path $PSScriptRoot 'build-environment.ps1')
 $app=Join-Path $dev 'src/Windows/GameShelf.Windows/bin/x64/Release/net10.0-windows10.0.19041.0/win-x64/GameShelf.Windows.exe'
 $p=Start-Process -FilePath $app -PassThru
 Start-Sleep -Seconds 8

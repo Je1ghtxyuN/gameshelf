@@ -158,8 +158,11 @@
         "serverID",
         "userID",
         "game",
-        "profileKey",
-        "share"
+        "profileKey"
+      ],
+      "oneOf": [
+        {"required": ["share"]},
+        {"required": ["mountedWorkspace", "workspaceReceipt"]}
       ],
       "properties": {
         "leaseID": {
@@ -177,8 +180,22 @@
         "game": {
           "$ref": "#/$defs/game"
         },
+        "workspaceReceipt": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Optional per-lease proof in .gameshelf-profile/workspace-receipt-v1. Never persist it in the client library."
+        },
         "profileKey": {
           "type": "string"
+        },
+        "mountedWorkspace": {
+          "type": "object",
+          "required": ["share", "relative"],
+          "additionalProperties": false,
+          "properties": {
+            "share": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+            "relative": {"type": "string", "pattern": "^[a-f0-9]{32}$"}
+          }
         },
         "share": {
           "$ref": "#/$defs/share"
@@ -733,6 +750,29 @@
         "$ref": "#/$defs/cover"
       },
       "description": "Requires current explicit grant, including administrators. No grant 403; granted missing cover 404. Only published gateway game IDs (existing 32-hex format)."
+    },
+    "GET /api/account/smb-enrollment": {
+      "auth": "authenticated",
+      "response": {"state": "unverified | verified | ready", "share": "present only when ready"},
+      "description": "Available on gateways with system SMB enrollment configured. The library advertises smbEnrollmentAvailable. Returns 404 on other gateways."
+    },
+    "POST /api/account/smb-enrollment/challenge": {
+      "auth": "authenticated",
+      "request": {"username": "local NAS username"},
+      "response": {"challengeID": "32 lowercase hexadecimal digits", "share": "verification share", "filename": "<challengeID>.proof"},
+      "description": "Create a short-lived challenge whose proof is delivered only through the read-only SMB verification share."
+    },
+    "POST /api/account/smb-enrollment/proof": {
+      "auth": "authenticated",
+      "request": {"challengeID": "32 lowercase hexadecimal digits", "proof": "64 lowercase hexadecimal digits"},
+      "response": {"state": "verified"},
+      "description": "Proof is single-use and bound to the account and session that started the challenge."
+    },
+    "POST /api/account/smb-enrollment/workspace": {
+      "auth": "authenticated",
+      "request": {},
+      "response": {"state": "ready", "share": "account workspace share"},
+      "description": "Provision a share for a verified identity. Repeating a completed request returns the same share."
     },
     "POST /api/account/password": {
       "auth": "authenticated",

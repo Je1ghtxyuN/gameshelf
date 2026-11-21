@@ -36,6 +36,19 @@ def reviewed_837(case):
 class SaveProfileRegistryTests(unittest.TestCase):
     setUp=test_unified_library.UnifiedLibraryTests.setUp
 
+    def test_secondary_locations_require_an_exact_patch(self):
+        _, _, manifest = setup_sources(self)
+        for digest in (
+            '2fcd8f8dd88e85fd689a91db1f98c7ab7c5790d3b871b1f89420e27db3bba8f2',
+            'e0b32aab4127325a307a8396b6a9b636781161fd23d595127e668d784342b85c',
+        ):
+            with self.subTest(digest=digest):
+                record = manifest['profiles'][0]['variants'][1]
+                locations = next(f for f in record['fingerprints'] if f['role'] == 'locations')
+                locations['sha256'] = digest
+                with self.assertRaises(APIError):
+                    profiles.validate_catalog(manifest)
+
     def test_exact_official_patch_is_fingerprint_bound_and_private_idempotent(self):
         mac,win,manifest=reviewed_837(self)
         catalog=profiles.load_catalog(self.s.state); variant=catalog[manifest['profiles'][0]['id']]['variants'][1]
@@ -59,6 +72,21 @@ class SaveProfileRegistryTests(unittest.TestCase):
         record['patches'][0]['targetSHA256']=hashlib.sha256(payload).hexdigest()
         record['patches'][0]['replacementBase64']=base64.b64encode(payload).decode()
         with self.assertRaises(APIError): profiles.validate_catalog(raw)
+
+    def test_832_location_module_requires_the_exact_832_patch(self):
+        _, _, manifest = reviewed_837(self)
+        windows = manifest['profiles'][0]['variants'][1]
+        location = next(item for item in windows['fingerprints'] if item['role'] == 'locations')
+        patch = windows['patches'][0]
+        original = MIT.read_bytes().replace(b'Copyright 2004-2025', b'Copyright 2004-2024', 1)
+        replacement = base64.b64decode(patch['replacementBase64']).replace(
+            b'Copyright 2004-2025', b'Copyright 2004-2024', 1)
+        location['sha256'] = patch['sourceSHA256'] = hashlib.sha256(original).hexdigest()
+        with self.assertRaises(APIError):
+            profiles.validate_catalog(manifest)
+        patch['targetSHA256'] = hashlib.sha256(replacement).hexdigest()
+        patch['replacementBase64'] = base64.b64encode(replacement).decode()
+        profiles.validate_catalog(manifest)
 
     def test_unknown_private_runtime_is_preserved_not_overwritten(self):
         mac,win,manifest=reviewed_837(self)
@@ -85,6 +113,60 @@ class SaveProfileRegistryTests(unittest.TestCase):
             with self.assertRaises(APIError): profiles.validate_catalog(raw)
         raw=copy.deepcopy(manifest); raw['profiles'][0]['variants'][0]['fingerprints'][0]['path']='../outside'
         with self.assertRaises(APIError): profiles.validate_catalog(raw)
+
+    def test_reviewed_cache_is_masked_only_in_the_private_view(self):
+        _, win, manifest = reviewed_837(self)
+        relative = 'renpy/__pycache__/savelocation.cpython-39.pyc'
+        cache = win / relative
+        cache.parent.mkdir()
+        cache.write_bytes(b'pinned cache')
+        record = manifest['profiles'][0]['variants'][1]
+        record['patches'][0]['compiledCaches'] = [
+            dict(path=relative, sha256=hashlib.sha256(cache.read_bytes()).hexdigest())]
+        variant = profiles.validate_catalog(manifest)[manifest['profiles'][0]['id']]['variants'][1]
+        view = self.s.state / 'cache-overlay-fixture'
+        shutil.copytree(win, view)
+        other = view / 'renpy/__pycache__/savelocation.cpython-39.opt-1.pyc'
+        other.write_bytes(b'unknown')
+        with self.assertRaises(APIError):
+            profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+        self.assertEqual((view / relative).read_bytes(), b'pinned cache')
+        other.unlink()
+        (view / relative).write_bytes(b'changed cache')
+        with self.assertRaises(APIError):
+            profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+        self.assertEqual((view / relative).read_bytes(), b'changed cache')
+        (view / relative).write_bytes(b'pinned cache')
+        profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+        self.assertFalse((view / relative).exists())
+        self.assertEqual(cache.read_bytes(), b'pinned cache')
+        profiles.verify_variant(view, variant, export=True)
+        profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+
+    def test_regenerated_cache_is_discarded_after_exact_patched_source_verification(self):
+        _, win, manifest = reviewed_837(self)
+        relative = 'renpy/__pycache__/savelocation.cpython-39.pyc'
+        cache = win / relative
+        cache.parent.mkdir()
+        cache.write_bytes(b'official original cache')
+        record = manifest['profiles'][0]['variants'][1]
+        record['patches'][0]['compiledCaches'] = [
+            dict(path=relative, sha256=hashlib.sha256(cache.read_bytes()).hexdigest())]
+        variant = profiles.validate_catalog(manifest)[manifest['profiles'][0]['id']]['variants'][1]
+        view = self.s.state / 'repeated-launch-cache'
+        shutil.copytree(win, view)
+        profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+        for _ in range(2):
+            (view / relative).write_bytes(b'regenerated from private patched source')
+            profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+            self.assertFalse((view / relative).exists())
+            profiles.verify_variant(view, variant, export=True)
+        self.assertEqual(cache.read_bytes(), b'official original cache')
+        (view / relative).write_bytes(b'do not trust this if source changed')
+        (view / 'renpy/savelocation.py').write_bytes(b'changed source')
+        with self.assertRaises(APIError):
+            profiles.apply_export_patches(view, variant, dict(uid=os.getuid()), chown=lambda *a: None)
+        self.assertTrue((view / relative).is_file())
 
     def test_private_patch_refuses_unreviewed_compiled_savelocation_cache(self):
         mac,win,manifest=reviewed_837(self)

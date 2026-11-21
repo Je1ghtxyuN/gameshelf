@@ -7,10 +7,26 @@ struct SharedLease:Decodable {
  let userID:String
  let game:SharedCatalogGame
  let profileKey:String
- let share:SharedSMBShare
+ let share:SharedSMBShare?
+ var mountedWorkspace:MountedWorkspaceLocation?
  var saveNamespace:SharedSaveNamespace?
  var renpyLaunch:RenpyLaunchProof?
+ var workspaceReceipt:String?
+
+ func verifyWorkspace(at root:URL)throws {
+  guard let workspaceReceipt else { return }
+  guard AccountLibraryNASSource.validRootID(leaseID), workspaceReceipt.utf8.count == 64,
+        workspaceReceipt.utf8.allSatisfy({(48...57).contains($0)||(97...102).contains($0)}) else {
+   throw LibraryError("账号工作区校验信息无效。")
+  }
+  let file = try DirectNASRoot.confinedURL(root:root, relative:".gameshelf-profile/workspace-receipt-v1", type:.typeRegular)
+  let expected = Data((leaseID+"\n"+workspaceReceipt+"\n").utf8)
+  guard try AccountLibraryDisk.regularData(file,limit:expected.count) == expected else {
+   throw LibraryError("NAS 工作区与当前账号会话不匹配。")
+  }
+ }
 }
+struct MountedWorkspaceLocation:Decodable {let share:String;let relative:String}
 private struct SharedHeartbeat:Decodable {let leaseID:String;let expiresAt:Double}
 final class SharedRunningSession {
  let lease:SharedLease
@@ -18,6 +34,7 @@ final class SharedRunningSession {
  let api:SharedAPI
  let token:String
  var timer:Timer?
+ var releaseRequested=false
  var closing=false
  var unmounted=false
  var reportedFailure=false
@@ -59,6 +76,8 @@ extension App {
    let route=canonical.map{"/api/library/games/"+$0+"/session"} ?? ("/api/games/"+ref.gameID+"/session")
    var sessionBody:[String:Any]=["deviceID":device]
    if canonical != nil{sessionBody["variantID"]=ref.gameID;sessionBody["adapter"]="renpy-savedir-v1"}
+   let mountedShare = canonical == nil ? nil : accountLibrary?.document?.mountedWorkspaceShare
+   if mountedShare != nil { sessionBody["mountedWorkspace"] = true }
    client.request(route,method:"POST",token:token,body:sessionBody){[weak self] (result:Result<SharedLease,Error>) in
     guard let self else{return}
     switch result {
@@ -75,29 +94,48 @@ extension App {
         try proof.validate(namespace:namespace,entry:game.entry,platform:game.entry.backend == .native ? "macos":"windows")
        }else if lease.renpyLaunch != nil{throw LibraryError("运行模块校验缺少账号存档映射。")
        }
-       let target=self.root.appendingPathComponent("NetworkMounts/"+ref.storageKey)
-       let receipts=self.root.appendingPathComponent("NetworkReceipts")
-       try FileManager.default.createDirectory(at:receipts,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
-       let receipt=receipts.appendingPathComponent(ref.storageKey+".json")
-       // A new server lease is the prerequisite: it proves an old server
-       // writer was revoked. Locally, recover only an exact private receipt.
-       if let stale=try NetworkLibraryMount.recoverReceipt(at:receipt,target:target,identityKey:ref.storageKey) {
-        try NetworkLibraryMount.unmount(stale)
-        _ = try NetworkLibraryMount.recoverReceipt(at:receipt,target:target,identityKey:ref.storageKey)
+       let mount:MountedLibraryShare
+       if let mountedShare {
+        guard lease.share == nil, lease.workspaceReceipt != nil, let location = lease.mountedWorkspace,
+              location.share == mountedShare, location.relative == lease.leaseID,
+              AccountLibraryNASSource.validRootID(location.relative) else {
+         throw LibraryError("服务器返回的账号工作区地址无效。")
+        }
+        guard let root = try NetworkLibraryMount.existingShareRoot(named:mountedShare) else {
+         throw LibraryError("请先在 Finder 连接账号工作区共享「"+mountedShare+"」。")
+        }
+        let folder = try DirectNASRoot.confinedURL(root:root, relative:location.relative, type:.typeDirectory)
+        mount = MountedLibraryShare(url:folder, owned:false)
+       } else {
+        guard let share = lease.share, lease.mountedWorkspace == nil else { throw LibraryError("服务器返回了不支持的工作区地址。") }
+        let target=self.root.appendingPathComponent("NetworkMounts/"+ref.storageKey)
+        let receipts=self.root.appendingPathComponent("NetworkReceipts")
+        try FileManager.default.createDirectory(at:receipts,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        let receipt=receipts.appendingPathComponent(ref.storageKey+".json")
+        // A new server lease is the prerequisite: it proves an old server
+        // writer was revoked. Locally, recover only an exact private receipt.
+        if let stale=try NetworkLibraryMount.recoverReceipt(at:receipt,target:target,identityKey:ref.storageKey) {
+         try NetworkLibraryMount.unmount(stale)
+         _ = try NetworkLibraryMount.recoverReceipt(at:receipt,target:target,identityKey:ref.storageKey)
+        }
+        try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        mount=try NetworkLibraryMount.mount(share:share,at:target);mounted=mount
+        try NetworkLibraryMount.persistReceipt(mounted:mount,identityKey:ref.storageKey,to:receipt)
+        guard mount.url.standardizedFileURL==URL(fileURLWithPath:game.folder).standardizedFileURL else{throw LibraryError("共享游戏挂载位置发生变化，未使用其他目录。")}
        }
-       try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
-       let mount=try NetworkLibraryMount.mount(share:lease.share,at:target);mounted=mount
-       try NetworkLibraryMount.persistReceipt(mounted:mount,identityKey:ref.storageKey,to:receipt)
+       try lease.verifyWorkspace(at:mount.url)
        if let proof=lease.renpyLaunch{try proof.verify(view:mount.url)}
-       guard mount.url.standardizedFileURL==URL(fileURLWithPath:game.folder).standardizedFileURL else{throw LibraryError("共享游戏挂载位置发生变化，未使用其他目录。")}
-       _ = try SharedProfile.networkProfile(game:game)
+       var rebound = game
+       rebound.folder = mount.url.path
+       let launchGame = rebound
+       _ = try SharedProfile.networkProfile(game:launchGame)
        if let namespace=lease.saveNamespace{_ = try RenpyAccountAdapter.locations(view:mount.url,relativePath:namespace.relativePath)}
        try FileManager.default.createDirectory(at:self.runtimeDataRoot(for:game),withIntermediateDirectories:true)
        self.preparationReady {
         guard !self.quitting else{self.discardShared(lease:lease,mount:mount,api:client,token:token);return}
         let session=SharedRunningSession(lease:lease,mounted:mount,api:client,token:token);self.sharedSessions[game.id]=session
         let timer=Timer(timeInterval:25,repeats:true){[weak self] _ in self?.heartbeatShared(game.id)};session.timer=timer;RunLoop.main.add(timer,forMode:.common)
-        self.setBusy(false,"");self.launch(game)
+        self.setBusy(false,"");self.launch(launchGame)
         // Preparation errors are synchronous or asynchronous; an idle session
         // is released by the next heartbeat if no launcher remains active.
        }
@@ -113,7 +151,7 @@ extension App {
  private static func safeSharedID(_ value:String)->Bool {!value.isEmpty && value.count<=128 && value.unicodeScalars.allSatisfy{CharacterSet(charactersIn:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_").contains($0)}}
  private func discardShared(lease:SharedLease,mount:MountedLibraryShare?,api:SharedAPI,token:String){
   DispatchQueue.global(qos:.utility).async {
-   if let mount{try? NetworkLibraryMount.unmount(mount)}
+   if let mount, mount.owned {try? NetworkLibraryMount.unmount(mount)}
    if Self.safeSharedID(lease.leaseID){api.request("/api/sessions/"+lease.leaseID,method:"DELETE",token:token){(_:Result<SharedOK,Error>) in}}
   }
  }
@@ -127,11 +165,12 @@ extension App {
  }
  func releaseShared(_ id:UUID){
   guard let session=sharedSessions[id],!session.closing,!sharedGameIsRunning(id) else{return}
+  session.releaseRequested=true
   session.closing=true
   DispatchQueue.global(qos:.utility).async {
    do {
     // Unmount first so the operating system flushes outstanding writes.
-    if !session.unmounted {try NetworkLibraryMount.unmount(session.mounted)}
+    if session.mounted.owned && !session.unmounted {try NetworkLibraryMount.unmount(session.mounted,acceptAlreadyDetached:true)}
     DispatchQueue.main.async {
      session.unmounted=true
      session.api.request("/api/sessions/"+session.lease.leaseID,method:"DELETE",token:session.token){[weak self,weak session] (result:Result<SharedOK,Error>) in DispatchQueue.main.async {
@@ -147,7 +186,7 @@ extension App {
        // heartbeat and must still pass the server's next-writer barrier.
        session.timer?.invalidate();self.sharedSessions.removeValue(forKey:id)
        self.showStatus(status==404 ? "共享游戏已退出，个人会话已关闭。":"共享游戏已退出，请重新登录共享库。")
-      }else{session.closing=false;self.showStatus("网络共享已卸载，正在等待服务器关闭个人会话。")}
+      }else{session.closing=false;self.showStatus("正在等待服务器关闭个人会话。")}
      }
      }}
     }

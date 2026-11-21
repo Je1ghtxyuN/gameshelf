@@ -1,4 +1,5 @@
 using GameShelf.Core;
+using GameShelf.Windows;
 var failures = 0; var count = 0;
 void Test(string name, Action action) { count++; try { action(); Console.WriteLine($"PASS {name}"); } catch(Exception e) { failures++; Console.WriteLine($"FAIL {name}: {e.GetType().Name} {e.Message}"); } }
 void Equal<T>(T expected,T actual) { if(!Equals(expected,actual)) throw new Exception($"Expected {expected}; got {actual}"); }
@@ -16,6 +17,14 @@ var sid=new string('1',32);var uid=new string('2',32);var gid=new string('3',32)
 var user=new Account(uid,"fixture",false);
 var variant=new LibraryVariant(gid,"windows",null,[new("Play.exe","wine",null)],null,true);
 var game=new LibraryGame(gid,"Fixture",0,false,[],0,null,null,[variant]);
+Test("reviewed account saves cannot take the direct NAS path", () =>
+{
+    Equal(true, variant.PermitsDirectNas());
+    Equal(false, (variant with { RequiresAccountWorkspace = true }).PermitsDirectNas());
+    Equal(false, (variant with { SaveCompatibilityKey = "reviewed" }).PermitsDirectNas());
+});
+Test("unplayed games have no playtime record",()=>Equal("尚无游玩记录",game.TimeLabel));
+Test("positive subsecond playtime does not display zero seconds",()=>Equal("1 秒",(game with{PlaytimeSeconds=0.2}).TimeLabel));
 var snapshot=new LibrarySnapshot(2,sid,user,[game],[]);
 var helperCases=new[]{"notification_helper.exe","chrome_crashpad_handler.exe","thprac.exe","replayview_CN.exe","custom_CN.exe","configuration_tool.exe","settings64.exe","unins000.exe","setup64.exe"};
 var titleCases=new[]{"CustomAdventure.exe","ConfigurationStory.exe"};
@@ -30,6 +39,30 @@ foreach(var path in helperCases.Concat(titleCases))
 
 void Run(Func<Task> task)=>task().GetAwaiter().GetResult();
 void Throws<T>(Action a) where T:Exception {try{a();}catch(T){return;}throw new Exception("Expected "+typeof(T).Name);}
+Test("NAS root mapping resolves multiple editions and rejects an escaping path", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "GameShelf-nas-root-" + Guid.NewGuid());
+    Directory.CreateDirectory(root);
+    try
+    {
+        var account = new AccountStore(root, sid, uid);
+        var preview = new PersonalNasPreview(account);
+        var mapping = new NasSource(other, "hgame/樱御前");
+        Equal(false, preview.HasRootBinding(variant with { NasSource = mapping }));
+        Throws<InvalidOperationException>(() => preview.ResolveFolder(variant with { NasSource = mapping }));
+        var mappings = Directory.CreateDirectory(Path.Combine(account.DirectoryPath, "nas-roots"));
+        File.WriteAllText(Path.Combine(mappings.FullName, other + ".path"), root);
+        Equal(true, preview.HasRootBinding(variant with { NasSource = mapping }));
+        Equal(false, preview.HasRootBinding(variant));
+        Equal(false, new PersonalNasPreview(new AccountStore(root, sid, other)).HasRootBinding(variant with { NasSource = mapping }));
+        Equal(Path.Combine(root, "hgame", "樱御前"), preview.ResolveFolder(variant with { NasSource = mapping }));
+        Equal(root, preview.ResolveFolder(variant with { NasSource = mapping with { Relative = "." } }));
+        Throws<ArgumentException>(() => preview.ResolveFolder(variant with { NasSource = mapping with { Relative = "../escape" } }));
+        preview.ClearRoot(other);
+        Throws<InvalidOperationException>(() => preview.ResolveFolder(variant with { NasSource = mapping }));
+    }
+    finally { Directory.Delete(root, true); }
+});
 Test("Windows edition selects legacy exe natively",()=>Equal(gid,Editions.Select(game).Variant.Id));
 Test("no macOS fallback",()=>Throws<InvalidOperationException>(()=>Editions.Select(game with {Variants=[variant with {Platform="macos"}]})));
 Test("no unavailable edition",()=>Throws<InvalidOperationException>(()=>Editions.Select(game with {Variants=[variant with {Available=false}]})));
@@ -42,7 +75,10 @@ Test("broker rejects unknown frame fields",()=>Run(BrokerCases.StrictJson));
 Test("broker process Dispose leaves view channel intact",()=>Run(BrokerCases.ProxyDispose));
 Test("broker operation and sequence binding",()=>Run(BrokerCases.Sequence));
 Test("broker writer stop precedes mapping closure acknowledgement",()=>Run(BrokerCases.CleanupOrdering));
+Test("broker failed native start still closes mapping",()=>Run(BrokerCases.FailedStartCanDisconnect));
 Test("broker uncertain mapping never acknowledges disconnect",()=>Run(BrokerCases.UncertainMapping));
+Test("broker mapping evidence distinguishes preflight from uncertain creation",()=>Run(BrokerCases.MappingFailureEvidence));
+Test("broker RPC preserves SMB substage and pre-map evidence",()=>Run(GameShelf.Tests.BrokerRpcCases.MappingFailureEvidence));
 Test("broker unacknowledged creation cannot claim clean",()=>Run(BrokerCases.UnacknowledgedCreation));
 Test("broker peer EOF independently stops and disconnects",()=>Run(BrokerCases.EofStops));
 Test("broker renewed deadline and independent expiry stop",()=>Run(BrokerCases.DeadlineAndRenewal));
@@ -88,6 +124,118 @@ Test("HTTP conflict remains actionable",()=>{using var api=Client(new(){Status=4
 var share=new SmbShare("127.0.0.1",1445,"fixture",null,"fixture-user","fixture-secret");
 var lease=new LaunchLease(new string('5',32),DateTimeOffset.UtcNow.ToUnixTimeSeconds()+90,sid,uid,new(gid),share,new("Play.exe","reviewed-relative-saves",true));
 Test("lease validates reviewed profile",()=>lease.Validate(sid,uid,variant,variant.Entries[0],DateTimeOffset.UtcNow));
+Test("owner overlay accepts a published Windows entry without a fingerprint", () =>
+{
+    var ownerVariant = variant with { NasSource = new(gid, "Games/Fixture") };
+    var overlay = lease with { WindowsLaunch = new("Play.exe", "owner-private-overlay", false) };
+    var now = DateTimeOffset.UtcNow;
+    overlay.Validate(sid, uid, ownerVariant, ownerVariant.Entries[0], now);
+    Throws<InvalidDataException>(() => overlay.Validate(sid, uid, variant, variant.Entries[0], now));
+    var forged = overlay with { WindowsLaunch = overlay.WindowsLaunch! with { SaveProfileVerified = true } };
+    Throws<InvalidDataException>(() => forged.Validate(sid, uid, ownerVariant, ownerVariant.Entries[0], now));
+});
+Test("family workspace accepts only the published Windows entry", () =>
+{
+    var protectedVariant = variant with { RequiresAccountWorkspace = true, FamilyWindowsOverlay = true };
+    var overlay = lease with { WindowsLaunch = new("Play.exe", "account-private-overlay", false) };
+    var now = DateTimeOffset.UtcNow;
+    overlay.Validate(sid, uid, protectedVariant, protectedVariant.Entries[0], now);
+    Throws<InvalidDataException>(() => overlay.Validate(sid, uid, variant, variant.Entries[0], now));
+    Throws<InvalidDataException>(() => overlay.Validate(sid, other, protectedVariant, protectedVariant.Entries[0], now));
+});
+Test("mounted lease rejects SMB credentials or a substituted lease folder", () =>
+{
+    var protectedVariant = variant with { RequiresAccountWorkspace = true, FamilyWindowsOverlay = true };
+    var mounted = lease with {
+        Share = null, WorkspaceReceipt = new string('a', 64),
+        MountedWorkspace = new("account-workspace", lease.LeaseID),
+        WindowsLaunch = new("Play.exe", "account-private-overlay", false)
+    };
+    var now = DateTimeOffset.UtcNow;
+    mounted.Validate(sid, uid, protectedVariant, protectedVariant.Entries[0], now);
+    Throws<InvalidDataException>(() => (mounted with { Share = share }).Validate(sid, uid, protectedVariant, protectedVariant.Entries[0], now));
+    Throws<InvalidDataException>(() => (mounted with { MountedWorkspace = new("account-workspace", other) }).Validate(sid, uid, protectedVariant, protectedVariant.Entries[0], now));
+    Throws<InvalidDataException>(() => (mounted with { WorkspaceReceipt = null }).Validate(sid, uid, protectedVariant, protectedVariant.Entries[0], now));
+});
+Test("mounted workspace selects only a unique system-mapped share root", () =>
+{
+    var mappings = new ShellMappingBackend.ExistingMapping[] {
+        new("Z:", @"\\nas\Game"),
+        new("Y:", @"\\"),
+        new("X:", @"\\nas\account-workspace\subfolder"),
+        new("W:", @"\\nas\ACCOUNT-WORKSPACE\")
+    };
+    Equal(@"W:\", ShellMappingBackend.ResolveExistingShare("account-workspace", mappings));
+    Throws<InvalidOperationException>(() => ShellMappingBackend.ResolveExistingShare("account-workspace", mappings.Take(3)));
+    Throws<InvalidOperationException>(() => ShellMappingBackend.ResolveExistingShare("account-workspace",
+        mappings.Append(new("V:", @"\\other-nas\account-workspace"))));
+});
+Test("mounted launch uses existing view and releases after game stop", () => Run(async () =>
+{
+    var family = variant with { RequiresAccountWorkspace = true, FamilyWindowsOverlay = true };
+    var mounted = lease with {
+        Share = null, WorkspaceReceipt = new string('a', 64),
+        MountedWorkspace = new("account-workspace", lease.LeaseID),
+        WindowsLaunch = new("Play.exe", "account-private-overlay", false)
+    };
+    var transport = new Transport();
+    var view = new MountedFixtureView();
+    transport.Reply = (request, body) =>
+    {
+        if (request.Method == HttpMethod.Post)
+        {
+            using var payload = System.Text.Json.JsonDocument.Parse(body);
+            Equal(true, payload.RootElement.GetProperty("mountedWorkspace").GetBoolean());
+            Equal("Play.exe", payload.RootElement.GetProperty("windowsEntry").GetString());
+            return mounted;
+        }
+        Equal(true, view.Process.Stopped);
+        Equal(true, view.Process.Disconnected);
+        return new object();
+    };
+    using var api = Client(transport);
+    api.Restore(new("fixture", DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600, user, sid));
+    await new GameRunner(api, store, view, new(), "fixture", mountedWorkspaceShare:"account-workspace")
+        .Run(game with { Variants = [family] }, CancellationToken.None);
+    Equal(true, view.Process.Started);
+    Equal(false, view.Process.Connected);
+    Equal("DELETE", transport.Requests.Last().Method);
+}));
+Test("SMB enrollment proof is confined to the named fixed-size file", () => Run(async () =>
+{
+    var directory = Path.Combine(Path.GetTempPath(),"GameShelf-proof-"+Guid.NewGuid());
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var id = new string('a',32);
+        var challenge = new SmbEnrollmentChallenge(id,"fixture",id+".proof");
+        var proof = new string('b',64);
+        await File.WriteAllTextAsync(Path.Combine(directory,challenge.Filename),proof);
+        Equal(proof,await challenge.ReadProof(directory,CancellationToken.None));
+        Throws<InvalidDataException>(() => Run(() => (challenge with { Filename="../outside" })
+            .ReadProof(directory,CancellationToken.None)));
+        await File.AppendAllTextAsync(Path.Combine(directory,challenge.Filename),"x");
+        Throws<InvalidDataException>(() => Run(() => challenge.ReadProof(directory,CancellationToken.None)));
+    }
+    finally { Directory.Delete(directory,true); }
+}));
+Test("mounted workspace receipt rejects stale and foreign leases", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "GameShelf-workspace-" + Guid.NewGuid());
+    var profile = Directory.CreateDirectory(Path.Combine(root, ".gameshelf-profile"));
+    var path = Path.Combine(profile.FullName, "workspace-receipt-v1");
+    try
+    {
+        var stamped = lease with { WorkspaceReceipt = new string('a', 64) };
+        File.WriteAllText(path, stamped.LeaseID + "\n" + stamped.WorkspaceReceipt + "\n");
+        stamped.VerifyWorkspace(root);
+        Throws<InvalidDataException>(() => (stamped with { LeaseID = new string('b', 32) }).VerifyWorkspace(root));
+        Throws<InvalidDataException>(() => (stamped with { WorkspaceReceipt = new string('c', 64) }).VerifyWorkspace(root));
+        File.AppendAllText(path, "extra");
+        Throws<InvalidDataException>(() => stamped.VerifyWorkspace(root));
+    }
+    finally { Directory.Delete(root, true); }
+});
 Test("lease rejects unknown saves",()=>Throws<InvalidDataException>(()=>(lease with{WindowsLaunch=null}).Validate(sid,uid,variant,variant.Entries[0],DateTimeOffset.UtcNow)));
 Test("lease rejects foreign account",()=>Throws<InvalidDataException>(()=>lease.Validate(sid,other,variant,variant.Entries[0],DateTimeOffset.UtcNow)));
 Test("lease rejects expired view",()=>Throws<InvalidDataException>(()=>(lease with{ExpiresAt=0}).Validate(sid,uid,variant,variant.Entries[0],DateTimeOffset.UtcNow)));
@@ -97,6 +245,22 @@ Test("SMB diagnostic redacts password",()=>Equal(false,share.ToString().Contains
 Test("SMB invalid port rejected",()=>Reject(()=>(share with{Port=0}).Validate()));
 Test("session start failure releases lease",()=>Run(async()=>{var t=new Transport{Reply=(r,_)=>r.Method==HttpMethod.Post?lease:new object()};using var api=Client(t);api.Restore(new("fixture",DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600,user,sid));var v=new FixtureView{FailStart=true};var g=new AccountGate();try{await new GameRunner(api,store,v,g,"fixture").Run(game,CancellationToken.None);}catch(IOException){}Equal(false,g.Active);Equal(true,v.Disconnected);Equal("DELETE",t.Requests.Last().Method);}));
 Test("unreviewed profile never connects or starts",()=>Run(async()=>{var t=new Transport{Reply=(r,_)=>r.Method==HttpMethod.Post?lease with{WindowsLaunch=null}:new object()};using var api=Client(t);api.Restore(new("fixture",DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600,user,sid));var v=new FixtureView();try{await new GameRunner(api,store,v,new(),"fixture").Run(game,CancellationToken.None);}catch(InvalidDataException){}Equal(false,v.Connected);Equal(false,v.Started);Equal("DELETE",t.Requests.Last().Method);}));
+Test("Windows SMB hint only travels on unified launch requests",()=>Run(async()=>{
+    var observed=new List<(string Path,bool Windows)>();
+    var transport=new Transport{Reply=(request,_)=>{
+        var path=request.RequestUri!.AbsolutePath;
+        observed.Add((path,request.Headers.TryGetValues("X-GameShelf-Client-Platform",out var values)
+                           && values.SequenceEqual(new[]{"windows"})));
+        return new object();
+    }};
+    using var api=Client(transport);
+    await api.Post($"/api/library/games/{gid}/session",new{});
+    await api.Post($"/api/games/{gid}/session",new{});
+    await api.Post($"/api/library/games/{gid}/playtime",new{});
+    Equal(true,observed[0].Windows);
+    Equal(false,observed[1].Windows);
+    Equal(false,observed[2].Windows);
+}));
 Test("successful session stops before release and queues time",()=>Run(async()=>{var t=new Transport{Reply=(r,_)=>r.Method==HttpMethod.Post?lease:new object()};using var api=Client(t);api.Restore(new("fixture",DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600,user,sid));var v=new FixtureView();await new GameRunner(api,store,v,new(),"fixture").Run(game,CancellationToken.None);Equal(true,v.Stopped);Equal(true,v.Disconnected);Equal("DELETE",t.Requests.Last().Method);}));
 Test("nonfinite end timestamp rejected",()=>Throws<ArgumentException>(()=>Run(()=>store.Enqueue(gid,time with{EventID=Guid.NewGuid(),EndedAt=double.NaN}))));
 Test("missing device rejected",()=>Throws<ArgumentException>(()=>Run(()=>store.Enqueue(gid,time with{EventID=Guid.NewGuid(),DeviceID=""}))));
@@ -152,6 +316,39 @@ Test("namespace six fields validate own canonical/compatibility",()=>Run(async()
 Test("namespace rejects other account",()=>Throws<InvalidDataException>(()=>renpy.SaveNamespace!.Validate(sid,other,gid)));
 Test("namespace rejects path override",()=>Throws<InvalidDataException>(()=>(renpy.SaveNamespace! with{RelativePath="../outside"}).Validate(sid,uid,gid)));
 Test("RenPy proof matches namespace, edition and exact entry",()=>RenpyAdapter.ValidateProof(renpy,renpyVariant,renpyVariant.Entries[0],gid));
+Test("RenPy 8.3.2 proof and export require the paired patch",()=>Run(async()=>
+{
+    var root=Path.Combine(tmp,"renpy-832-view");
+    var lease=await RenpyFixture.Export(root,sid,uid,gid,gid);
+    const string source="3ed845b5c9d13dcf581a9143b5fc933fc1dfad8f03c93bccc2ef0955adb7e884";
+    var review=lease.RenpyLaunch!;
+    var bytes=System.Text.Encoding.UTF8.GetBytes(System.Text.Encoding.UTF8.GetString(
+        RenpyFixture.PatchedModule()).Replace("Copyright 2004-2025","Copyright 2004-2024"));
+    var mixed=review.Fingerprints.Select(f=>f.Role=="locations"?f with{SourceSHA256=source}:f).ToArray();
+    Throws<InvalidDataException>(()=>RenpyAdapter.ValidateProof(
+        lease with{RenpyLaunch=review with{Fingerprints=mixed}},renpyVariant,renpyVariant.Entries[0],gid));
+    var paired=mixed.Select(f=>f.Role=="locations"?f with{ExportSHA256=RenpyFixture.Digest(bytes)}:f).ToArray();
+    lease=lease with{RenpyLaunch=review with{Fingerprints=paired}};
+    RenpyAdapter.ValidateProof(lease,renpyVariant,renpyVariant.Entries[0],gid);
+    await File.WriteAllBytesAsync(Path.Combine(root,"renpy/savelocation.py"),bytes);
+    await RenpyAdapter.Prepare(root,lease);
+}));
+foreach(var (version,sourceDigest,patchedDigest) in new[]
+{
+    ("8.1.3","2fcd8f8dd88e85fd689a91db1f98c7ab7c5790d3b871b1f89420e27db3bba8f2","178aaa36fba90afcaed683e31048200328653fbbf4bc7c6c7e9d5ac65f721c24"),
+    ("8.5.2","e0b32aab4127325a307a8396b6a9b636781161fd23d595127e668d784342b85c","1b4b59ac6e0359d99da69378a18a446eecb0c08038e7d06452e56a19bbca46d4"),
+})
+{
+    Test($"RenPy {version} accepts only its paired single-save-location patch",()=>
+    {
+        var proof=renpy.RenpyLaunch!;
+        var exact=proof.Fingerprints.Select(f=>f.Role=="locations"?f with{SourceSHA256=sourceDigest,ExportSHA256=patchedDigest}:f).ToArray();
+        RenpyAdapter.ValidateProof(renpy with{RenpyLaunch=proof with{Fingerprints=exact}},renpyVariant,renpyVariant.Entries[0],gid);
+        var original=exact.Select(f=>f.Role=="locations"?f with{ExportSHA256=sourceDigest}:f).ToArray();
+        Throws<InvalidDataException>(()=>RenpyAdapter.ValidateProof(
+            renpy with{RenpyLaunch=proof with{Fingerprints=original}},renpyVariant,renpyVariant.Entries[0],gid));
+    });
+}
 Test("RenPy mismatched review revision rejected",()=>Throws<InvalidDataException>(()=>RenpyAdapter.ValidateProof(renpy with{WindowsLaunch=renpy.WindowsLaunch! with{ProfileRevision=2}},renpyVariant,renpyVariant.Entries[0],gid)));
 Test("RenPy missing critical runtime role rejected",()=>Throws<InvalidDataException>(()=>RenpyAdapter.ValidateProof(renpy with{RenpyLaunch=renpy.RenpyLaunch! with{Fingerprints=renpy.RenpyLaunch!.Fingerprints.Where(f=>f.Role!="config").ToArray()}},renpyVariant,renpyVariant.Entries[0],gid)));
 Test("RenPy launch uses only fixed savedir/three env names",()=>Run(async()=>{var plan=await RenpyAdapter.Prepare(renpyRoot,renpy);Equal("--savedir",plan.Arguments[0]);Equal(Path.GetFullPath(Path.Combine(renpyRoot,RenpyAdapter.RelativePath)),plan.Arguments[1]);Equal(3,plan.Environment.Count);Equal(false,plan.Environment.ContainsKey("APPDATA"));Equal("1",plan.Environment["PYTHONDONTWRITEBYTECODE"]);}));

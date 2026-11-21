@@ -30,11 +30,10 @@ final class AccountLibraryController {
  private var totals:[String:Double]=[:]
  private var discovery:AccountDiscoveryWindowController?
  private var aliases:[String:String]=[:]
+ private var legacyCardLinks:[UUID:String]=[:]
  private var coverAttempts=Set<String>()
- private let verifyOwnerHistory:AccountOwnerTransitionGate.VerifyHistoricalReceipt?
 
- init(app:App,connection:SharedConnection,token:String,verifyOwnerHistory:AccountOwnerTransitionGate.VerifyHistoricalReceipt?=nil)throws {
-  self.verifyOwnerHistory=verifyOwnerHistory
+ init(app:App,connection:SharedConnection,token:String)throws {
   self.app=app;self.connection=connection;self.token=token
   identity=try AccountLibraryIdentity(serverID:connection.serverID,accountID:connection.accountID)
   api=try SharedAPI(address:connection.address,certificateSHA256:connection.certificateSHA256)
@@ -45,6 +44,23 @@ final class AccountLibraryController {
  func canonicalID(for localID:UUID)->String?{localToCanonical[localID]}
  func game(for localID:UUID)->AccountLibraryGame?{canonicalID(for:localID).flatMap{id in document?.games.first{$0.id==id}}}
  func launchIssue(for localID:UUID)->String?{unavailable.contains(localID) ? "没有适用于当前系统的可用版本。":nil}
+ func originalNativeLaunch(for game: Game) throws -> Game? {
+  guard active, current, let app, let remote = self.game(for: game.id), let ref = game.shared,
+        ref.serverID == identity.serverID, ref.accountID == identity.accountID,
+        game.entry.backend == .native else { return nil }
+  let saved = try PersonalLibraryBindingStore(root: app.root).binding
+  let bindings = try AccountOwnerNativeLaunchBinding.load(root: app.root, identity: identity, savedBinding: saved)
+  guard let binding = bindings.first(where: { $0.canonicalID == remote.id && $0.variantID == ref.gameID }),
+        let variant = remote.variants.first(where: { $0.id == ref.gameID && $0.entries.contains(game.entry) }) else { return nil }
+  if variant.saveCompatibilityKey != nil { return nil }
+  let originals = try LibraryStore(root: app.root).games
+  guard let original = originals.first(where: { $0.id == binding.localID }),
+        binding.matches(original: original, game: remote, selection: .init(variant: variant, entry: game.entry),
+                        identity: identity, savedBinding: saved) else {
+   throw LibraryError("原有 macOS 游戏入口已变更，请核对后再启动。")
+  }
+  return original
+ }
  func load(remember:Bool){
   Task { [weak self] in
    guard let self,let app=self.app else{return}
@@ -56,7 +72,14 @@ final class AccountLibraryController {
     let owner=try binding.map{try AccountLibraryIdentity(serverID:$0.serverID,accountID:$0.accountID)}
     let profile=try AccountLibraryProfile.open(under:app.root,identity:self.identity,legacyOwner:owner)
     let cached=try AccountLibraryCache(root:profile,identity:self.identity)
-    let approved=try AccountOwnerTransitionGate.loadApprovedAliases(profileRoot:profile,owner:self.identity,savedBinding:binding,verifyHistoricalReceipt:self.verifyOwnerHistory)
+    let approved=try await AccountOwnerTransitionGate.loadApprovedAliases(profileRoot:profile,owner:self.identity,savedBinding:binding,fetchHistoricalReceipt:{operation in
+     guard self.current else{throw CancellationError()}
+     return try await self.api.ownerMigrationHistory(operationID:operation,token:self.token)
+    })
+    guard self.current else{return}
+    if !approved.isEmpty {
+     guard try PersonalLibraryBindingStore(root:app.root).binding==binding else{throw LibraryError("Original owner binding changed during historical verification.")}
+    }
     self.aliases=Dictionary(uniqueKeysWithValues:approved.map{($0.key.uuidString,$0.value)})
     let local=try LibraryStore(root:profile)
     try AccountLibraryProjection.recover(store:local,identity:self.identity)
@@ -70,6 +93,19 @@ final class AccountLibraryController {
     try latest.validate(identity:self.identity)
     guard self.current else{return}
     try self.metadataSync?.seed(latest)
+    if owner == self.identity, latest.user.admin,
+       let bytes = try AccountLibraryDisk.regularData(app.root.appendingPathComponent("shared-scan-locations.json"), limit: 512 * 1024),
+       let roots = try? JSONDecoder().decode([AccountLibraryMigrationRoot].self, from: bytes),
+       let editions: AccountLegacyEditions = try? await self.api.value("/api/admin/library/editions", token: self.token) {
+     guard self.current else { return }
+     guard try PersonalLibraryBindingStore(root: app.root).binding == binding else {
+      throw LibraryError("本机游戏库绑定已变化，请重新登录。")
+     }
+     let originals = try LibraryStore(root: app.root).games
+     self.legacyCardLinks = AccountLegacyCardLinks.make(games: originals, mappings: roots, editions: editions.editions,
+                                                       document: latest, identity: self.identity)
+      .filter { self.aliases[$0.key.uuidString] == nil }
+    }
     try self.apply(latest,to:local)
     let history=try PlaytimeStore(root:profile)
     let queue=try AccountPlaytimeOutbox(root:profile,identity:self.identity,deviceID:self.deviceID)
@@ -188,7 +224,8 @@ final class AccountLibraryController {
  }
  func queueClosedSessions(){
   guard active,current,let app,let outbox,let document else{return}
-  let history=AccountLibraryHistoryLinks.make(visible:localToCanonical,aliases:aliases,document:document)
+  let links = localToCanonical.merging(legacyCardLinks) { visible, _ in visible }
+  let history=AccountLibraryHistoryLinks.make(visible:links,aliases:aliases,document:document)
   do{for (id,canonical) in history{for session in app.playtime?.records(gameID:id) ?? []{try outbox.enqueue(session:session,canonicalID:canonical)}}}catch{app.showStatus(error.localizedDescription)}
  }
  func displayedSeconds(for id:UUID)->Double? {
@@ -217,7 +254,12 @@ final class AccountLibraryController {
   }
   // Owner-only legacy entries remain available until their exact NAS root/entry
   // has been registered and linked. Foreign/revoked shared records never leak.
-  next += old.filter{!used.contains($0.id) && $0.shared==nil && aliases[$0.id.uuidString]==nil}
+  let saved = try PersonalLibraryBindingStore(root: app.root).binding
+  let nativeBindings = try AccountOwnerNativeLaunchBinding.load(root: app.root, identity: identity, savedBinding: saved)
+  let nativeOriginals = Set(nativeBindings.map(\.localID))
+  let available = Set(remote.games.map(\.id))
+  let linked = Set(legacyCardLinks.filter { available.contains($0.value) }.keys)
+  next += old.filter{!used.contains($0.id) && $0.shared==nil && aliases[$0.id.uuidString]==nil && !nativeOriginals.contains($0.id) && !linked.contains($0.id)}
   var groups=remote.collections.map{c in GameCollection(id:c.id,name:c.name,gameIDs:remote.games.filter{$0.collectionIDs.contains(c.id)}.compactMap{r in mapping.first{$0.value==r.id}?.key})}
   let retained=Set(next.map(\.id)).subtracting(Set(mapping.keys))
   for oldGroup in store.collections {
@@ -373,4 +415,14 @@ extension App {
  }
  func refreshAccountLibrary(){accountLibrary?.refresh()}
  func showAccountDiscovery(){if let account=accountLibrary,account.active{account.showDiscovery()}else if store.root==root{showDiscovery()}}
+}
+
+extension SharedAPI {
+ func ownerMigrationHistory(operationID:String,token:String)async throws->AccountOwnerTransitionConfirmation {
+  let bytes=operationID.utf8
+  guard bytes.count==32,bytes.allSatisfy({(48...57).contains($0)||(97...102).contains($0)}),!token.isEmpty else{
+   throw LibraryError("Invalid historical adoption request.")
+  }
+  return try await value("/api/account/owner-migrations/"+operationID+"/history",token:token)
+ }
 }

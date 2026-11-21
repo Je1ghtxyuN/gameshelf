@@ -58,7 +58,7 @@ extension RTP {
   }
   return nil
  }
- static func register(game:Game,runtime:URL,root:URL) throws {
+ static func register(game:Game,runtime:URL,root:URL,directNAS:Bool=false) throws {
   guard let name=try requirement(URL(fileURLWithPath:game.folder)) else{return}
   if installedAssets(prefix:runtime.appendingPathComponent("Contents/SharedSupport/prefix"),name:name,managedRoot:root) != nil{return}
   guard let dependency=try assets(game:game,root:root) else{return}
@@ -66,7 +66,7 @@ extension RTP {
   let signature=dependency.name+"\n"+dependency.directory.path
   if (try? String(contentsOf:marker,encoding:.utf8))==signature{return}
   let generation=["RPGVXAce":"RGSS3","RPGVX":"RGSS2","Standard":"RGSS"][dependency.name]!
-  let spec=try Wrapper.launchSpec(game:game,runtime:runtime)
+  let spec=try Wrapper.launchSpec(game:game,runtime:runtime,directNAS:directNAS)
   let p=Process();p.executableURL=spec.executable;p.environment=spec.environment
   let path="Z:"+dependency.directory.path.replacingOccurrences(of:"/",with:"\\")
   p.arguments=["reg","add","HKLM\\Software\\Enterbrain\\"+generation+"\\RTP","/v",dependency.name,"/t","REG_SZ","/d",path,"/f","/reg:32"]

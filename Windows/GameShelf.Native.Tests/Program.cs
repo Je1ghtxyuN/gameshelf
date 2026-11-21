@@ -16,7 +16,8 @@ await Test("native suspended launch and normal exit",async()=>{await using var j
 await Test("job tracks descendants after launcher exits",async()=>{await using var job=NativeJob.Start(Path.Combine(system,"cmd.exe"),system,"/c start /b ping.exe -n 4 127.0.0.1");var clock=Stopwatch.StartNew();using var timeout=new CancellationTokenSource(15000);await job.Wait(timeout.Token);if(clock.Elapsed<TimeSpan.FromSeconds(2))throw new Exception("Descendant escaped monitoring");});
 await Test("job cancellation kills all descendants",async()=>{await using var job=NativeJob.Start(Path.Combine(system,"cmd.exe"),system,"/c start /b ping.exe -n 100 127.0.0.1");await Task.Delay(400);await job.Stop();using var timeout=new CancellationTokenSource(3000);await job.Wait(timeout.Token);});
 await Test("missing executable fails without surviving job",async()=>{try{await using var job=NativeJob.Start(Path.Combine(system,"gameshelf-no-such-file.exe"),system);throw new Exception("Unexpected launch");}catch(System.ComponentModel.Win32Exception){}await Task.CompletedTask;});
-await Test("approved synthetic EXE per-account isolation + lease + time over loopback HTTP",SyntheticLaunch.Run);
+await Test("approved synthetic EXE per-account isolation + lease + time over loopback HTTP",()=>SyntheticLaunch.Run());
+await Test("family workspace runs real native EXE with independent relative saves",()=>SyntheticLaunch.Run(familyWorkspace:true));
 await Test("standalone native EXE usual saves/time persistence",SyntheticLaunch.RunStandalone);
 await Test("reviewed RenPy adapter fixed args/env on actual native EXE",SyntheticLaunch.RunRenpyAdapter);
 Console.WriteLine($"{count-failed}/{count} native passed");return failed==0?0:1;

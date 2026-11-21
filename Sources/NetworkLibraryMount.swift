@@ -53,10 +53,11 @@ struct MountedLibraryShare {
  let owned: Bool
  fileprivate let identity: NetworkLibraryMount.MountIdentity?
  fileprivate let receipt: UUID?
+ fileprivate let originalTarget: NetworkLibraryMount.TargetState?
  // A caller-created handle never confers permission to unmount an existing volume.
- init(url: URL, owned: Bool) { self.url = url; self.owned = owned; identity = nil; receipt = nil }
- fileprivate init(url: URL, identity: NetworkLibraryMount.MountIdentity, receipt: UUID) {
-  self.url = url; owned = true; self.identity = identity; self.receipt = receipt
+ init(url: URL, owned: Bool) { self.url = url; self.owned = owned; identity = nil; receipt = nil; originalTarget = nil }
+ fileprivate init(url: URL, identity: NetworkLibraryMount.MountIdentity, receipt: UUID, originalTarget: NetworkLibraryMount.TargetState? = nil) {
+  self.url = url; owned = true; self.identity = identity; self.receipt = receipt; self.originalTarget = originalTarget
  }
 }
 
@@ -149,17 +150,22 @@ enum NetworkLibraryMount {
   }
   let receipt = UUID()
   ownedMounts[receipt] = identity
-  return MountedLibraryShare(url: target, identity: identity, receipt: receipt)
+  return MountedLibraryShare(url: target, identity: identity, receipt: receipt, originalTarget: before)
  }
 
  /// No force flag, retries, directory removal, or unmounting of an inherited mount.
- static func unmount(_ mounted: MountedLibraryShare, operations: Operations = .live) throws {
+ static func unmount(_ mounted: MountedLibraryShare, acceptAlreadyDetached: Bool = false, operations: Operations = .live) throws {
   guard mounted.owned else { return }
   try validateTargetURL(mounted.url)
   lock.lock(); defer { lock.unlock() }
   guard let receipt = mounted.receipt, let expected = mounted.identity, ownedMounts[receipt] == expected,
         expected.target == mounted.url.path, expected.fileSystem == "smbfs" else { throw Failure.notOwned }
-  guard case .mounted(let actual) = try operations.inspect(mounted.url), actual == expected else {
+  let current = try operations.inspect(mounted.url)
+  if acceptAlreadyDetached, let original = mounted.originalTarget, current == original {
+   ownedMounts.removeValue(forKey: receipt)
+   return
+  }
+  guard case .mounted(let actual) = current, actual == expected else {
    ownedMounts.removeValue(forKey: receipt)
    throw Failure.notOwned
   }
@@ -332,6 +338,36 @@ enum NetworkLibraryMount {
   }
  }
 
+ static func existingShareRoot(named name: String, mounts: [MountIdentity]? = nil) throws -> URL? {
+  let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+  guard (1...64).contains(name.utf8.count), name.first?.isLetter == true || name.first?.isNumber == true,
+        name.allSatisfy({ allowed.contains($0) }) else { throw Failure.invalidShare }
+  let candidates = try (mounts ?? mountInventory()).filter { mount in
+   guard mount.fileSystem == "smbfs", mount.source.hasPrefix("//"), mount.target.hasPrefix("/"),
+         let endpoint = URLComponents(string: "smb:" + mount.source), endpoint.host != nil,
+         endpoint.password == nil, endpoint.query == nil, endpoint.fragment == nil else { return false }
+   return endpoint.path.caseInsensitiveCompare("/" + name) == .orderedSame
+  }
+  guard candidates.count <= 1 else { throw Failure.unexpectedMount }
+  return candidates.first.map { URL(fileURLWithPath: $0.target, isDirectory: true) }
+ }
+
+ private static func mountInventory() throws -> [MountIdentity] {
+  // MNT_NOWAIT reads the kernel mount inventory without requesting server stats.
+  let count = getfsstat(nil, 0, MNT_NOWAIT)
+  guard count >= 0, count < 100_000 else { throw Failure.unsafeTarget }
+  var mounts: [statfs] = .init(repeating: .init(), count: Int(count) + 16)
+  let found = mounts.withUnsafeMutableBufferPointer { buffer in
+   getfsstat(buffer.baseAddress, Int32(buffer.count * MemoryLayout<statfs>.stride), MNT_NOWAIT)
+  }
+  guard found >= 0, Int(found) < mounts.count else { throw Failure.unsafeTarget }
+  return mounts.prefix(Int(found)).map { value in
+   var entry = value
+   return MountIdentity(target: tupleString(&entry.f_mntonname), fileSystem: tupleString(&entry.f_fstypename),
+    source: tupleString(&entry.f_mntfromname), fsid0: entry.f_fsid.val.0, fsid1: entry.f_fsid.val.1)
+  }
+ }
+
  private static func inspectTarget(_ target: URL) throws -> TargetState {
   try validateTargetURL(target)
   // Reject ancestor links; O_NOFOLLOW below checks an unmounted final component.
@@ -344,21 +380,7 @@ enum NetworkLibraryMount {
          info.st_uid == 0 || info.st_uid == geteuid(),
          info.st_mode & 0o022 == 0 || info.st_mode & S_ISVTX != 0 else { throw Failure.unsafeTarget }
   }
-  // MNT_NOWAIT reads the kernel mount inventory without requesting server stats.
-  let count = getfsstat(nil, 0, MNT_NOWAIT)
-  guard count >= 0, count < 100_000 else { throw Failure.unsafeTarget }
-  var mounts: [statfs] = .init(repeating: .init(), count: Int(count) + 16)
-  let found = mounts.withUnsafeMutableBufferPointer { buffer in
-   getfsstat(buffer.baseAddress, Int32(buffer.count * MemoryLayout<statfs>.stride), MNT_NOWAIT)
-  }
-  guard found >= 0, Int(found) < mounts.count else { throw Failure.unsafeTarget }
-  for var entry in mounts.prefix(Int(found)) {
-   let path = tupleString(&entry.f_mntonname)
-   if path == target.path {
-    return .mounted(MountIdentity(target: path, fileSystem: tupleString(&entry.f_fstypename),
-     source: tupleString(&entry.f_mntfromname), fsid0: entry.f_fsid.val.0, fsid1: entry.f_fsid.val.1))
-   }
-  }
+  if let mounted = try mountInventory().first(where: { $0.target == target.path }) { return .mounted(mounted) }
   let fd = Darwin.open(target.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
   if fd < 0 && errno == ENOENT { return .missing }
   guard fd >= 0 else { throw Failure.unsafeTarget }

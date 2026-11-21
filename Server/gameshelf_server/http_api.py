@@ -20,9 +20,10 @@ ASSETS = {'/': ('admin.html', 'text/html; charset=utf-8'),
           '/admin.css': ('admin.css', 'text/css; charset=utf-8')}
 
 class Application:
-    def __init__(self, service, public_origin=None, public_address=None, certificate_sha256=None):
+    def __init__(self, service, public_origin=None, public_address=None, certificate_sha256=None, windows_smb_host=None):
         self.service = service
         self.public_origin = public_origin
+        self.windows_smb_host = windows_smb_host
         from .invitation import public_address as normalize_address, certificate_pin
         configured_address=public_address or public_origin
         self.public_address=normalize_address(configured_address) if configured_address else None
@@ -42,7 +43,7 @@ class Application:
     def require_admin(self,token):
         if not self.service.authenticate(token)['admin']:
             raise APIError(403,'Administrator required')
-    def dispatch(self, method, path, data, token):
+    def dispatch(self, method, path, data, token, *, windows_client=False):
         s = self.service
         if method == 'GET' and path == '/api/server-info':
             return dict(name=getattr(s,'display_name','GameShelf'),serverID=s.server_id,version='1.1.0',setupRequired=s.setup_required())
@@ -70,6 +71,12 @@ class Application:
         # A disabled admin cannot race a queued request after authentication.
         with s.lock:
             user = s.authenticate(token)
+            enrollment_path = '/api/account/smb-enrollment'
+            if path == enrollment_path or path.startswith(enrollment_path+'/'):
+                enrollment = getattr(s, 'smb_enrollment_api', None)
+                if enrollment is None:
+                    raise APIError(404, 'SMB enrollment is not configured')
+                return enrollment.dispatch(method, path[len(enrollment_path):], data, user['id'], token)
             if method=='POST' and path=='/api/account/password':
                 return s.change_password(user,data)
             if path.startswith('/api/admin/'):
@@ -162,7 +169,10 @@ class Application:
             if method=='POST' and library_game:
                 if library_game[2]=='metadata': return s.library_metadata(user,library_game[1],data)
                 if library_game[2]=='playtime': return s.library_playtime(user,library_game[1],data)
-                return s.library_session(user,library_game[1],data,token=token)
+                lease = s.library_session(user,library_game[1],data,token=token)
+                if windows_client and self.windows_smb_host and 'share' in lease:
+                    lease['share'] = dict(lease['share'], host=self.windows_smb_host, port=445)
+                return lease
             if method == 'GET' and path == '/api/personal-library':
                 return s.personal_libraries(user)
             m=re.fullmatch('/api/personal-library/'+UUID_PATTERN,path)
@@ -268,7 +278,9 @@ class Handler(BaseHTTPRequestHandler):
                         raise APIError(400, 'JSON object required')
             auth = self.headers.get('Authorization','')
             token = auth[7:] if auth.startswith('Bearer ') else ''
-            result = self.server.application.dispatch(self.command, path, data, token)
+            platforms = self.headers.get_all('X-GameShelf-Client-Platform', [])
+            result = self.server.application.dispatch(self.command, path, data, token,
+                                                      windows_client=platforms == ['windows'])
             download='gameshelf-invitation.json' if self.command=='GET' and path=='/api/admin/invitation' else None
             self.reply(200,result,download=download)
         except APIError as e:
@@ -304,7 +316,7 @@ class Server(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         pass
 
-def make_server(service, host='127.0.0.1', port=8443, *, cert=None, key=None, public_origin=None, public_address=None, certificate_sha256=None):
+def make_server(service, host='127.0.0.1', port=8443, *, cert=None, key=None, public_origin=None, public_address=None, certificate_sha256=None, windows_smb_host=None):
     try:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
@@ -323,7 +335,7 @@ def make_server(service, host='127.0.0.1', port=8443, *, cert=None, key=None, pu
         server_type = IPv6Server
     server = server_type((host,port),Handler,bind_and_activate=False)
     try:
-        server.application = Application(service,public_origin,public_address,certificate_sha256)
+        server.application = Application(service,public_origin,public_address,certificate_sha256,windows_smb_host)
         if context:
             server.socket = context.wrap_socket(server.socket,server_side=True,do_handshake_on_connect=False)
         server.server_bind()

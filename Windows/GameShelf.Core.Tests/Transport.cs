@@ -64,3 +64,28 @@ sealed class BoundFixtureView:ILeaseBoundWindowsView
     public Task<IGameProcess> Start(string root,string entry,CancellationToken ct)=>Task.FromResult<IGameProcess>(new BoundProcess(WaitDelayMs));
     sealed class BoundProcess(int delay):IGameProcess {public Task Wait(CancellationToken ct)=>Task.Delay(delay,ct);public Task Stop()=>Task.CompletedTask;public ValueTask DisposeAsync()=>ValueTask.CompletedTask;}
 }
+
+
+sealed class MountedFixtureView : IMountedWindowsView
+{
+    public FixtureView Process { get; } = new();
+
+    public Task<string> ConnectMounted(WindowsLeaseContext context, string expectedShare, CancellationToken ct)
+    {
+        context.Validate(DateTimeOffset.UtcNow);
+        if (context.Lease.MountedWorkspace?.Share != expectedShare)
+            throw new InvalidDataException("Wrong fixture share");
+        return Task.FromResult(@"Z:\fixture");
+    }
+
+    public Task<string> Connect(SmbShare share, CancellationToken ct) =>
+        throw new InvalidOperationException("Unexpected request to create an SMB connection");
+
+    public Task Disconnect() => Process.Disconnect();
+
+    public Task<IGameProcess> Start(string root, string entry, CancellationToken ct) =>
+        Process.Start(root, entry, ct);
+
+    public Task<IGameProcess> StartReviewed(string root, string entry, LaunchLease lease, CancellationToken ct) =>
+        throw new InvalidOperationException("Unexpected engine-specific launch");
+}

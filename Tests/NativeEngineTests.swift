@@ -24,6 +24,18 @@ import Foundation
   let a=try NativeEngines.renpySpec(game:sharedA,engines:engines,data:root.appendingPathComponent("SharedA"))
   let b=try NativeEngines.renpySpec(game:sharedB,engines:engines,data:root.appendingPathComponent("SharedB"))
   guard URL(fileURLWithPath:a.environment["RENPY_PATH_TO_SAVES"]!).lastPathComponent==URL(fileURLWithPath:b.environment["RENPY_PATH_TO_SAVES"]!).lastPathComponent else{fatalError("same account native RenPy saves depend on device record UUID")}
+  let roaming=source.appendingPathComponent(".gameshelf-profile/WindowsUsers/Player/AppData/Roaming/RenPy")
+  try fm.createDirectory(at:roaming,withIntermediateDirectories:true)
+  let continued=try NativeEngines.renpySpec(game:sharedA,engines:engines,data:root.appendingPathComponent("SharedA"))
+  guard continued.environment["RENPY_PATH_TO_SAVES"]==roaming.path else{fatalError("Native RenPy must reuse existing account Wine saves instead of silently selecting another directory")}
+  let localAgain=try NativeEngines.renpySpec(game:game,engines:engines,data:root.appendingPathComponent("Data"))
+  guard localAgain.environment["RENPY_PATH_TO_SAVES"]==plan.environment["RENPY_PATH_TO_SAVES"] else{fatalError("Ordinary local game save path changed")}
+  try fm.removeItem(at:roaming)
+  try fm.createSymbolicLink(at:roaming,withDestinationURL:root)
+  do {
+   _ = try NativeEngines.renpySpec(game:sharedA,engines:engines,data:root.appendingPathComponent("SharedA"))
+   fatalError("External account save symlink must be rejected")
+  }catch{}
   print("PASS: native RenPy exact-version fallback, bundled launch, source reference, managed saves/logs")
  }
 }

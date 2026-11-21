@@ -29,6 +29,7 @@ enum NativeAppCache {
   var signingProfile: String?
   var bootstrapProfile: String?
   var reviewedRuntimeProfile: String?
+  var mediaIndexFingerprint: String?
  }
  private struct BundleInfo {
   let plist: [String: Any]
@@ -92,7 +93,7 @@ enum NativeAppCache {
  }
  private static func receipt(_ source: URL, _ info: BundleInfo, _ game: Game,
                              _ profile: String, _ payloads: [String], _ runtimeFingerprint: String,
-                             reviewedRuntimeProfile: String? = nil) throws -> Receipt {
+                             reviewedRuntimeProfile: String? = nil, mediaIndexFingerprint: String? = nil) throws -> Receipt {
   let attrs = try attributes(info.executable)
   guard let size = attrs[.size] as? NSNumber, let date = attrs[.modificationDate] as? Date else {
    throw fail("无法读取主程序元数据。")
@@ -102,7 +103,7 @@ enum NativeAppCache {
                  executableSize: size.int64Value, executableMTime: date.timeIntervalSince1970,
                  profile: profile, payloads: payloads, runtimeFingerprint: runtimeFingerprint,
                  bootstrapProfile: profile == "renpy-autorun-v1" && reviewedRuntimeProfile == nil ? NativeRenpyBootstrap.profile(source:source,executableName:info.executable.lastPathComponent):nil,
-                 reviewedRuntimeProfile: reviewedRuntimeProfile)
+                 reviewedRuntimeProfile: reviewedRuntimeProfile, mediaIndexFingerprint: mediaIndexFingerprint)
  }
  private struct RuntimeEntry: Encodable {
   let path: String
@@ -263,6 +264,7 @@ enum NativeAppCache {
   }
  }
  static func prepare(game: Game, root: URL,
+                     enableOwnerMediaIndex: Bool = false,
                      reviewedRuntimeProfile: String? = nil,
                      verifyReviewedRuntime: ((URL) throws -> Void)? = nil,
                      runningCheck: (URL) -> Bool = NativeAppIdentity.isRunning(at:)) throws -> NativeAppLaunch {
@@ -288,7 +290,14 @@ enum NativeAppCache {
   try safeCachePath(local)
   let cacheRoot = local.appendingPathComponent("NativeApps")
   try safeCachePath(cacheRoot)
-  guard !contains(source, local), !contains(local, source),
+  // A verified account lease is mounted beside NativeApps inside the client root.
+  if contains(local, source) {
+   guard let account = game.shared else { throw fail("缓存与源应用目录重叠。") }
+   let mount = local.appendingPathComponent("NetworkMounts/" + account.storageKey)
+   try safeCachePath(mount)
+   guard contains(mount, source) else { throw fail("缓存与源应用目录重叠。") }
+  }
+  guard !contains(source, local),
         !contains(source, cacheRoot), !contains(cacheRoot, source) else {
    throw fail("缓存与源应用目录重叠。")
   }
@@ -319,7 +328,10 @@ enum NativeAppCache {
   }
   let excluded = Set((payloads + windows).map { "Contents/" + $0 })
   let sourceRuntime = try runtimeSnapshot(source, excluding: excluded)
-  let expected = try receipt(source, info, game, profile, payloads, sourceRuntime.fingerprint,reviewedRuntimeProfile:reviewedRuntimeProfile)
+  let mediaIndex = try enableOwnerMediaIndex && game.shared == nil && profile == "renpy-autorun-v1" &&
+   NativeVolumePolicy.usesSMB(source) ? NativeRenpyMediaIndex.load(root: local, gameID: game.id, source: source, info: info.data) : nil
+  let expected = try receipt(source, info, game, profile, payloads, sourceRuntime.fingerprint,
+                             reviewedRuntimeProfile:reviewedRuntimeProfile, mediaIndexFingerprint:mediaIndex?.fingerprint)
   let requiresSigning = try NativeAppIdentity.isMachO(info.executable)
   let destination = cacheRoot.appendingPathComponent(game.id.uuidString + ".app", isDirectory: true)
   let receiptURL = cacheRoot.appendingPathComponent(game.id.uuidString + ".json")
@@ -386,7 +398,8 @@ enum NativeAppCache {
   var bytes = stagedRuntime.bytes
   guard stagedRuntime.fingerprint == sourceRuntime.fingerprint,
         try receipt(source, bundle(source, allowMountedRoot: mountedBundleRoot), game, profile, payloads,
-                    runtimeSnapshot(source, excluding: excluded).fingerprint,reviewedRuntimeProfile:reviewedRuntimeProfile) == expected else {
+                    runtimeSnapshot(source, excluding: excluded).fingerprint,reviewedRuntimeProfile:reviewedRuntimeProfile,
+                    mediaIndexFingerprint:mediaIndex == nil ? nil : NativeRenpyMediaIndex.load(root:local,gameID:game.id,source:source,info:info.data)?.fingerprint) == expected else {
    throw fail("复制期间源应用发生变化，请重试。")
   }
   var publishedReceipt = expected
@@ -394,6 +407,10 @@ enum NativeAppCache {
    guard requiresSigning,try NativeRenpyBootstrap.prepare(stage:stage,executableName:info.executable.lastPathComponent) else {
     throw fail("已识别的 Ren’Py 引导无法适配，未发布运行副本。")
    }
+  }
+  if let mediaIndex {
+   guard requiresSigning else { throw fail("媒体索引需要可签名的原生运行程序。") }
+   try mediaIndex.prepare(stage:stage)
   }
   if requiresSigning {
    try NativeAppIdentity.signStaged(stage, identifier: bundleID, excluding: Set(payloads.map { "Contents/" + $0 }))

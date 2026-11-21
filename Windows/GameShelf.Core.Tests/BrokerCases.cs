@@ -15,8 +15,39 @@ static class BrokerCases
     public static async Task ProxyDispose(){int calls=0;var p=new BrokerProcessProxy((command,_)=>{calls++;return Task.FromResult(new BrokerStatus(true,true,true,false));});await p.Wait(CancellationToken.None);await p.Stop();int before=calls;await p.DisposeAsync();Check(before==calls);}
     public static async Task Sequence(){var v=new View();Guid id=Guid.NewGuid();await using var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask);var r=await e.Execute(new(1,Guid.NewGuid(),1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None);Check(!r.Success&&v.ConnectCount==0);r=await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None);Check(r.Success);r=await e.Execute(new(1,id,1,BrokerCommand.Start),CancellationToken.None);Check(!r.Success&&v.StartCount==0);await e.PeerLost();}
     public static async Task CleanupOrdering(){var v=new View();Guid id=Guid.NewGuid();await using var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask);Check((await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None)).Success);Check((await e.Execute(new(1,id,2,BrokerCommand.Start),CancellationToken.None)).Success);var result=await e.Execute(new(1,id,3,BrokerCommand.Disconnect),CancellationToken.None);Check(result.Success&&result.Status is{NativeStopped:true,MappingGone:true});Check(v.Events.SequenceEqual(new[]{"connect","start","stop","dispose","disconnect"}));}
+    public static async Task FailedStartCanDisconnect()
+    {
+        var view = new View { FailStart = true };
+        var id = Guid.NewGuid();
+        await using var engine = new BrokerEngine(id, view, (_, _, _) => Task.CompletedTask);
+        Check((await engine.Execute(new(1, id, 1, BrokerCommand.Connect, Context(Now + 90)), CancellationToken.None)).Success);
+        var start = await engine.Execute(new(1, id, 2, BrokerCommand.Start), CancellationToken.None);
+        Check(!start.Success && start.Error == BrokerStage.Start);
+        var close = await engine.Execute(new(1, id, 3, BrokerCommand.Disconnect), CancellationToken.None);
+        Check(close.Success && close.Status is { NativeStopped: true, MappingGone: true });
+        Check(view.Events.SequenceEqual(new[] { "connect", "start", "disconnect" }));
+    }
     public static async Task UncertainMapping(){var v=new View{FailDisconnect=true};Guid id=Guid.NewGuid();var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask);await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None);var result=await e.Execute(new(1,id,2,BrokerCommand.Disconnect),CancellationToken.None);Check(!result.Success&&result.Error==BrokerStage.Disconnect);try{await e.DisposeAsync();throw new Exception("Pending dispose succeeded");}catch(BrokerFailure failure)when(failure.Stage==BrokerStage.Disconnect){}}
     public static async Task UnacknowledgedCreation(){var v=new View{FailConnect=true};Guid id=Guid.NewGuid();var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask);Check(!(await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None)).Success);Check(!(await e.Execute(new(1,id,2,BrokerCommand.Disconnect),CancellationToken.None)).Success);Check(!v.Events.Contains("disconnect"));try{await e.DisposeAsync();throw new Exception("Pending dispose succeeded");}catch(BrokerFailure failure)when(failure.Stage==BrokerStage.Disconnect){}}
+    public static async Task MappingFailureEvidence()
+    {
+        foreach (var stage in new[] { SmbOperationStage.Preflight, SmbOperationStage.Create, SmbOperationStage.Verify })
+        {
+            var view = new View { FailConnect = true };
+            var id = Guid.NewGuid();
+            var engine = new BrokerEngine(id, view, (_, _, _) => Task.CompletedTask,
+                _ => 67, smbStage: _ => stage);
+            bool preMap = stage == SmbOperationStage.Preflight;
+            var reply = await engine.Execute(new(1, id, 1, BrokerCommand.Connect, Context(Now + 90)), CancellationToken.None);
+            Check(!reply.Success && reply.NativeCode == 67 && reply.SmbStage == stage
+                && reply.MappingNotAttempted == preMap);
+            var close = await engine.Execute(new(1, id, 2, BrokerCommand.Disconnect), CancellationToken.None);
+            Check(close.Success == preMap && (close.Status?.MappingGone == true) == preMap);
+            Check(!view.Events.Contains("disconnect"));
+            try { await engine.DisposeAsync(); Check(preMap); }
+            catch (BrokerFailure failure) when (!preMap && failure.Stage == BrokerStage.Disconnect) { }
+        }
+    }
     public static async Task EofStops(){var v=new View();Guid id=Guid.NewGuid();await using var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask);await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None);await e.Execute(new(1,id,2,BrokerCommand.Start),CancellationToken.None);await e.PeerLost();Check(v.Events.Contains("stop")&&v.Events.Last()=="disconnect");}
     public static async Task DeadlineAndRenewal(){var clock=new Clock();var v=new View();Guid id=Guid.NewGuid();await using var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask,time:clock);await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(clock.GetUtcNow().ToUnixTimeMilliseconds()/1000d+20)),CancellationToken.None);await e.Execute(new(1,id,2,BrokerCommand.Start),CancellationToken.None);var renew=await e.Execute(new(1,id,3,BrokerCommand.Renew,LeaseID:lease,ExpiresAt:clock.GetUtcNow().ToUnixTimeMilliseconds()/1000d+100),CancellationToken.None);Check(renew.Success);clock.Advance(25);await Task.Delay(100);Check(!v.Events.Contains("stop"));clock.Advance(100);await v.Closed.Task.WaitAsync(TimeSpan.FromSeconds(2));Check(v.Events.Contains("stop"));}
     public static async Task DisposeDrains(){var v=new View();var id=Guid.NewGuid();var e=new BrokerEngine(id,v,(_,_,_)=>Task.CompletedTask);await e.Execute(new(1,id,1,BrokerCommand.Connect,Context(Now+90)),CancellationToken.None);await e.Execute(new(1,id,2,BrokerCommand.Start),CancellationToken.None);await e.DisposeAsync();Check(v.Events.Contains("stop")&&v.Events.Last()=="disconnect");}
@@ -30,9 +61,9 @@ static class BrokerCases
     sealed class Clock:TimeProvider{long offset;public override DateTimeOffset GetUtcNow()=>DateTimeOffset.UtcNow.AddSeconds(Interlocked.Read(ref offset));public void Advance(int seconds)=>Interlocked.Add(ref offset,seconds);}
     sealed class View:IWindowsView
     {
-        public bool FailDisconnect,FailConnect;public Action? OnConnect;public int ConnectCount,StartCount;public List<string> Events=[];public TaskCompletionSource Closed=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool FailDisconnect,FailConnect,FailStart;public Action? OnConnect;public int ConnectCount,StartCount;public List<string> Events=[];public TaskCompletionSource Closed=new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<string> Connect(SmbShare share,CancellationToken ct){ConnectCount++;if(FailConnect)throw new IOException();Events.Add("connect");OnConnect?.Invoke();return Task.FromResult("private-helper-root");}
-        public Task<IGameProcess> Start(string root,string relative,CancellationToken ct){StartCount++;Events.Add("start");return Task.FromResult<IGameProcess>(new Process(this));}
+        public Task<IGameProcess> Start(string root,string relative,CancellationToken ct){StartCount++;Events.Add("start");if(FailStart)throw new IOException();return Task.FromResult<IGameProcess>(new Process(this));}
         public Task Disconnect(){if(FailDisconnect)throw new IOException();Events.Add("disconnect");Closed.TrySetResult();return Task.CompletedTask;}
         sealed class Process(View view):IGameProcess{readonly TaskCompletionSource ended=new(TaskCreationOptions.RunContinuationsAsynchronously);public Task Wait(CancellationToken ct)=>ended.Task.WaitAsync(ct);public Task Stop(){view.Events.Add("stop");ended.TrySetResult();return Task.CompletedTask;}public ValueTask DisposeAsync(){view.Events.Add("dispose");return ValueTask.CompletedTask;}}
     }

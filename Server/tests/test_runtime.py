@@ -27,6 +27,50 @@ class RuntimeTests(unittest.TestCase):
             Settings.from_env(dict(env,GAMESHELF_TLS_KEY=''))
         with self.assertRaises(ValueError):
             Settings.from_env(dict(env,GAMESHELF_LEASE_TTL='0'))
+    def test_workspace_exports_are_explicitly_enabled(self):
+        from gameshelf_server.__main__ import Settings
+        env = dict(GAMESHELF_SOURCE_ROOTS='["/games"]', GAMESHELF_SMB_HOST='nas.example.invalid')
+        self.assertIsNone(Settings.from_env(env).workspace_export_root)
+        env['GAMESHELF_WORKSPACE_EXPORT_ROOT'] = '/exports'
+        with self.assertRaises(ValueError):
+            Settings.from_env(env)
+        env['GAMESHELF_WORKSPACE_MANIFEST'] = '/manifest.json'
+        with self.assertRaises(ValueError):
+            Settings.from_env(env)
+        env['GAMESHELF_DIRECT_NAS'] = '1'
+        self.assertEqual(Settings.from_env(env).workspace_export_root, Path('/exports'))
+
+    def test_smb_enrollment_requires_mounted_workspace_configuration(self):
+        from gameshelf_server.__main__ import Settings
+        env = dict(GAMESHELF_SOURCE_ROOTS='["/games"]', GAMESHELF_SMB_HOST='nas.example.invalid',
+                   GAMESHELF_SMB_ENROLLMENT_SOCKET='/host/enrollment.sock',
+                   GAMESHELF_SMB_VERIFICATION_SHARE='verify-gameshelf')
+        with self.assertRaises(ValueError):
+            Settings.from_env(env)
+        env.update(GAMESHELF_DIRECT_NAS='1', GAMESHELF_WORKSPACE_EXPORT_ROOT='/exports',
+                   GAMESHELF_WORKSPACE_MANIFEST='/manifest.json')
+        settings = Settings.from_env(env)
+        self.assertEqual(settings.smb_enrollment_socket,Path('/host/enrollment.sock'))
+        self.assertEqual(settings.smb_verification_share,'verify-gameshelf')
+        with self.assertRaises(ValueError):
+            Settings.from_env(dict(env,GAMESHELF_SMB_VERIFICATION_SHARE='../unsafe'))
+
+    def test_reserved_lease_requires_original_workspace_export_mount(self):
+        from contextlib import closing
+        import sqlite3
+        from gameshelf_server.__main__ import record_workspace_export_root
+        with tempfile.TemporaryDirectory() as directory, closing(sqlite3.connect(':memory:')) as db:
+            root = Path(directory)
+            db.executescript('CREATE TABLE settings(key PRIMARY KEY,value); CREATE TABLE leases(status);')
+            record_workspace_export_root(db, root)
+            db.execute("INSERT INTO leases VALUES ('revoking')")
+            with self.assertRaisesRegex(ValueError, 'original workspace export mount'):
+                record_workspace_export_root(db, None)
+            record_workspace_export_root(db, root)
+            db.execute("UPDATE leases SET status='closed'")
+            record_workspace_export_root(db, None)
+            self.assertEqual(db.execute('SELECT * FROM settings').fetchall(), [])
+
     def test_process_lock_prevents_multiple_writers(self):
         from gameshelf_server.__main__ import state_lock
         with tempfile.TemporaryDirectory() as tmp:

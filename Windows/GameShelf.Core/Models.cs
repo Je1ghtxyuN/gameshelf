@@ -2,15 +2,19 @@ using System.Text.Json;
 namespace GameShelf.Core;
 public sealed record Account(string Id,string Username,bool Admin);
 public sealed record LibraryEntry(string Path,string Backend,string? Engine);
-public sealed record LibraryVariant(string Id,string Platform,string? Version,LibraryEntry[] Entries,string? SaveCompatibilityKey,bool Available);
+public sealed record NasSource(string RootID,string Relative);
+public sealed record LibraryVariant(string Id,string Platform,string? Version,LibraryEntry[] Entries,string? SaveCompatibilityKey,bool Available,NasSource? NasSource=null,bool RequiresAccountWorkspace=false,bool FamilyWindowsOverlay=false)
+{
+    public bool PermitsDirectNas() => !RequiresAccountWorkspace && SaveCompatibilityKey == null;
+}
 public sealed record LibraryGame(string Id,string Title,long Revision,bool Favorite,string[] CollectionIDs,double PlaytimeSeconds,JsonElement? LastPlayed,string? CoverSHA256,LibraryVariant[] Variants,LaunchPreferences? PreferredEntries=null)
 {
     public override string ToString()=>Title;
-    public string TimeLabel => PlaytimeSeconds<60 ? $"{Math.Max(0,PlaytimeSeconds):0} 秒" : TimeSpan.FromSeconds(Math.Max(0,PlaytimeSeconds)).TotalHours>=1 ? $"{PlaytimeSeconds/3600:0.0} 小时" : $"{PlaytimeSeconds/60:0} 分钟";
+    public string TimeLabel => PlaytimeSeconds<=0 ? "尚无游玩记录" : PlaytimeSeconds<60 ? $"{Math.Max(1,PlaytimeSeconds):0} 秒" : TimeSpan.FromSeconds(Math.Max(0,PlaytimeSeconds)).TotalHours>=1 ? $"{PlaytimeSeconds/3600:0.0} 小时" : $"{PlaytimeSeconds/60:0} 分钟";
     public string VersionLabel => string.Join(" · ",Variants.Where(v=>v.Platform=="windows").Select(v=>v.Version??"Windows"));
 }
 public sealed record Collection(string Id,string Name);
-public sealed record LibrarySnapshot(int SchemaVersion,string ServerID,Account User,LibraryGame[] Games,Collection[] Collections);
+public sealed record LibrarySnapshot(int SchemaVersion,string ServerID,Account User,LibraryGame[] Games,Collection[] Collections,bool OwnerWindowsOverlay=false,bool DirectNas=false,string? MountedWorkspaceShare=null,bool SmbEnrollmentAvailable=false);
 public sealed record LoginResult(string Token,double ExpiresAt,Account User,string ServerID);
 public sealed record Root(string Id,string Title);
 public sealed record Candidate(string Id,string Title,bool Available,bool Added=false,bool Ignored=false,LibraryEntry[]? Entries=null)

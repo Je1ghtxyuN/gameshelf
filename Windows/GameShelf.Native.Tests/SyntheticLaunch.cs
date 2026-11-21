@@ -6,11 +6,11 @@ using System.Text;
 using System.Text.Json;
 static class SyntheticLaunch
 {
-    public static async Task Run()
+    public static async Task Run(bool familyWorkspace = false)
     {
         var root=Path.Combine(Path.GetTempPath(),"GameShelf-isolation-"+Guid.NewGuid());Directory.CreateDirectory(root);
         try{
-            await using var server=new LeaseServer();
+            await using var server=new LeaseServer(familyWorkspace);
             var exe=Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,"../../../../GameShelf.LaunchFixture/bin/Release/net10.0"));
             foreach(var account in new[]{"A","B"}){
                 var viewRoot=Path.Combine(root,"views",account);Directory.CreateDirectory(viewRoot);
@@ -85,7 +85,13 @@ static class SyntheticLaunch
         readonly TcpListener listener=new(IPAddress.Loopback,0);readonly CancellationTokenSource stop=new();readonly Task loop;
         public int Port=>((IPEndPoint)listener.LocalEndpoint).Port;
         public HashSet<string> Active {get;}=[];public Dictionary<string,HashSet<Guid>> Events {get;}=[];
-        public LeaseServer(){listener.Start();loop=Serve();}
+        readonly bool familyWorkspace;
+        public LeaseServer(bool familyWorkspace)
+        {
+            this.familyWorkspace=familyWorkspace;
+            listener.Start();
+            loop=Serve();
+        }
         async Task Serve()
         {
             while(!stop.IsCancellationRequested){
@@ -95,8 +101,20 @@ static class SyntheticLaunch
                 while(!string.IsNullOrEmpty(h=await reader.ReadLineAsync())){if(h.StartsWith("Content-Length:",StringComparison.OrdinalIgnoreCase))length=int.Parse(h[15..]);if(h.StartsWith("Authorization:",StringComparison.OrdinalIgnoreCase))auth=h;}
                 if(length>16384)throw new Exception("Unbounded request");var chars=new char[length];var read=0;while(read<length){var n=await reader.ReadAsync(chars.AsMemory(read));if(n==0)throw new EndOfStreamException();read+=n;}var body=new string(chars);var route=parts[1];var account=auth.EndsWith("B")?"B":"A";var uid=new string(account=="A"?'2':'6',32);object value=new{};
                 if(route=="/api/login"){account=JsonDocument.Parse(body).RootElement.GetProperty("username").GetString()!;uid=new string(account=="A"?'2':'6',32);value=new LoginResult("fixture-token-"+account,DateTimeOffset.UtcNow.ToUnixTimeSeconds()+300,new(uid,account,false),ServerID);}
-                else if(route=="/api/library")value=new LibrarySnapshot(2,ServerID,new(uid,account,false),[new(GameID,"Synthetic Approved EXE",0,false,[],0,null,null,[new(GameID,"windows",null,[new("Fixture.exe","native","fixture")],null,true)])],[]);
-                else if(route.EndsWith("/session")){if(!Active.Add(uid))throw new Exception("Duplicate writer");value=new LaunchLease(new string(account=="A"?'5':'7',32),DateTimeOffset.UtcNow.ToUnixTimeSeconds()+90,ServerID,uid,new(GameID),new("127.0.0.1",1445,"fixture-"+account,null,"synthetic","synthetic"),new("Fixture.exe","reviewed-relative-saves",true));}
+                else if(route=="/api/library")value=new LibrarySnapshot(2,ServerID,new(uid,account,false),[new(GameID,"Synthetic Approved EXE",0,false,[],0,null,null,[new(GameID,"windows",null,[new("Fixture.exe","native","fixture")],null,true,
+                    RequiresAccountWorkspace:familyWorkspace,FamilyWindowsOverlay:familyWorkspace)])],[],DirectNas:familyWorkspace);
+                else if(route.EndsWith("/session"))
+                {
+                    using var request=JsonDocument.Parse(body);
+                    var requestedEntry=request.RootElement.TryGetProperty("windowsEntry",out var entry);
+                    if(requestedEntry!=familyWorkspace || (requestedEntry && entry.GetString()!="Fixture.exe"))
+                        throw new Exception("Wrong Windows workspace request");
+                    if(!Active.Add(uid))throw new Exception("Duplicate writer");
+                    var proof=new WindowsLaunch("Fixture.exe",
+                        familyWorkspace ? "account-private-overlay" : "reviewed-relative-saves", !familyWorkspace);
+                    value=new LaunchLease(new string(account=="A"?'5':'7',32),DateTimeOffset.UtcNow.ToUnixTimeSeconds()+90,
+                        ServerID,uid,new(GameID),new("127.0.0.1",1445,"fixture-"+account,null,"synthetic","synthetic"),proof);
+                }
                 else if(parts[0]=="DELETE")Active.Remove(uid);
                 else if(route.EndsWith("/playtime")){var item=JsonSerializer.Deserialize<TimeEvent>(body,AccountStore.Json)!;if(!Events.TryGetValue(uid,out var ids))Events[uid]=ids=[];ids.Add(item.EventID);value=new{playtimeSeconds=item.ElapsedSeconds,lastPlayed=item.EndedAt};}
                 else throw new Exception("Unexpected fixture route");

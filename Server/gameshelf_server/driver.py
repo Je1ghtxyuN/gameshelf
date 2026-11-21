@@ -8,8 +8,10 @@ from pathlib import Path
 import re
 import secrets
 import signal
+import stat
 import sys
 import subprocess
+import tempfile
 import time
 
 from .service import clean_path, overlaps, tree_signature, link_target
@@ -75,7 +77,7 @@ def prepare_view(path, unix_uid, source_root):
     os.chown(profile, unix_uid, unix_uid)
 
 class LinuxDriver:
-    def __init__(self, state, host, port=445, *, runner=run, mount_probe=is_mountpoint, prepare_view=prepare_view, chown=os.chown):
+    def __init__(self, state, host, port=445, *, runner=run, mount_probe=is_mountpoint, prepare_view=prepare_view, chown=os.chown, mz_sync=None, workspace_exports=None):
         if not isinstance(host, str) or not host or any(c.isspace() or c in '/\\@?#' for c in host):
             raise ValueError('Configure an SMB hostname without URL or credentials')
         if type(port) is not int or not 1 <= port <= 65535:
@@ -86,6 +88,8 @@ class LinuxDriver:
         os.chmod(self.state, 0o711)
         self.host, self.port, self.run = host, port, runner
         self.mount_probe, self.prepare_view, self.chown = mount_probe, prepare_view, chown
+        self.mz_sync = mz_sync
+        self.workspace_exports = workspace_exports
         self.runtime = self.state/'samba'
         for name in ('private', 'state', 'cache', 'lock', 'pid', 'ncalrpc'):
             (self.runtime/name).mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -255,7 +259,10 @@ force directory mode = 0700
             verify_variant(lower,save_namespace['variant'],save_paths=save_paths or [])
             namespace_data=prepare_namespace(self.state,lease,user,save_namespace,
                 lambda game:self.paths(dict(lease,game_id=game))['upper'],chown=self.chown)
-        unix_user = self._account(username, user['uid'])
+        mounted_workspace = lease.get('mounted_workspace', False)
+        if mounted_workspace and self.workspace_exports is None:
+            raise RuntimeError('Mounted workspace export is unavailable')
+        unix_user = None if mounted_workspace else self._account(username, user['uid'])
         # Ancestors permit traversal only; the account's directory is private.
         workspaces = self.state/'workspaces'
         workspaces.mkdir(mode=0o711, exist_ok=True)
@@ -292,7 +299,7 @@ force directory mode = 0700
         profile.mkdir(mode=0o700,exist_ok=True)
         self.chown(profile,user['uid'],user['uid'])
         if save_namespace:
-            from .save_profiles import RELATIVE,apply_export_patches
+            from .save_profiles import RELATIVE,apply_export_patches,prepare_windows_images
             from .reviewed_profiles import _check_path
             apply_export_patches(paths['merged'],save_namespace['variant'],user,chown=self.chown)
             _check_path(paths['merged'],RELATIVE,directory=True)
@@ -306,12 +313,76 @@ force directory mode = 0700
             self.run(['mount','-o','remount,bind,rw,nosuid,nodev,noexec',str(target)])
             if not self.mount_probe(target): raise RuntimeError('Canonical save bind could not be verified')
             self.verify_save_namespace(lease,save_namespace)
+            prepare_windows_images(paths['merged'],save_namespace['variant'])
+        if self.mz_sync is not None:
+            self.mz_sync.prepare(lease, lower, user, paths['merged'])
+        from .unity_save_redirect import ENTRY
+        windows_entry = lease.get('windows_entry')
+        # Wine runs this same Windows distribution. Its private save location
+        # must not depend on which desktop requested the account workspace.
+        if ((windows_entry and windows_entry.casefold() == ENTRY.casefold()) or
+                (not windows_entry and (lower / ENTRY).is_file())):
+            self._mount_unity_save_redirect(lease, lower, paths['merged'], user['uid'])
+        self._write_workspace_receipt(profile, lease)
+        if mounted_workspace:
+            lease['mounted_workspace_descriptor'] = self.workspace_exports.publish(
+                lease['user_id'], user['uid'], lease['id'], paths['merged'])
+            return None
         password = secrets.token_urlsafe(32)
         self.run(['smbpasswd', '-s', '-c', str(self.config), '-a', username], input=password+'\n'+password+'\n')
         self.shares[name] = (paths['merged'], username, unix_user)
         self._write_config()
         self._control('reload-config')
         return dict(host=self.host, port=self.port, name=name, username=username, password=password)
+    def _write_workspace_receipt(self, profile, lease):
+        receipt = secrets.token_hex(32)
+        data = (self._id(lease['id']) + '\n' + receipt + '\n').encode('ascii')
+        with tempfile.NamedTemporaryFile(dir=profile, prefix='.workspace-receipt-', delete=False) as file:
+            stage = Path(file.name)
+            try:
+                file.write(data)
+                file.flush()
+                os.fchmod(file.fileno(), 0o444)
+                stage.replace(profile/'workspace-receipt-v1')
+            finally:
+                stage.unlink(missing_ok=True)
+        lease['workspace_receipt'] = receipt
+
+    def prepare_generic_windows_entry(self, lease, entry):
+        from .common import APIError
+        from .workflow import _canonical_relative
+        view = self.paths(lease)['merged']
+        if not self.mount_probe(view) or _canonical_relative(view, entry) != entry:
+            raise APIError(409, 'Windows entry is unavailable in the account overlay')
+        from .save_profiles import prepare_windows_entry
+        prepare_windows_entry(view/entry)
+
+    def _runtime_patch_file(self, lease):
+        return clean_path(self.state / 'windows-runtime-patches' / self._id(lease['id']))
+
+    def _mount_unity_save_redirect(self, lease, lower, view, uid):
+        from .unity_save_redirect import ASSEMBLY, prepare
+        if not self.mount_probe(view):
+            raise RuntimeError('Unity save redirection requires a mounted account view')
+        payload = prepare(lower, view)
+        patch = self._runtime_patch_file(lease)
+        patch.parent.mkdir(mode=0o700, exist_ok=True)
+        info = patch.parent.stat()
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise RuntimeError('Unsafe Windows runtime patch directory')
+        fd = os.open(patch, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as file:
+            file.write(payload)
+            file.flush()
+            # Samba serves this read-only bind as the workspace's Unix account.
+            self.chown(patch, uid, uid)
+            os.fchmod(file.fileno(), 0o500)
+        target = view / ASSEMBLY
+        self.run(['mount', '--bind', str(patch), str(target)])
+        self.run(['mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec', str(target)])
+        if not self.mount_probe(target):
+            raise RuntimeError('Unity save redirection bind could not be verified')
+
     def verify_launch_profile(self, lease, profile):
         from .reviewed_profiles import verify_export
         verify_export(self.paths(lease)['merged'],profile)
@@ -338,6 +409,17 @@ force directory mode = 0700
         self._write_config()
         self._control('reload-config')
         self._control('close-share', name)
+        if self.workspace_exports is not None:
+            self.workspace_exports.revoke(lease['user_id'], lease['id'])
+        patch = self._runtime_patch_file(lease)
+        if patch.exists():
+            from .unity_save_redirect import ASSEMBLY
+            target = clean_path(paths['merged'] / ASSEMBLY)
+            if self.mount_probe(target):
+                self.run(['umount', str(target)])
+                if self.mount_probe(target):
+                    raise RuntimeError('Windows runtime patch is still mounted')
+            patch.unlink()
         if lease.get('save_namespace'):
             import json
             from .namespace_storage import validate_context
@@ -352,6 +434,10 @@ force directory mode = 0700
         for key in ('merged', 'lower'):
             if self.mount_probe(paths[key]):
                 self.run(['umount', str(paths[key])])
+        if self.mz_sync is not None:
+            if self.mount_probe(paths['merged']) or self.mount_probe(paths['lower']):
+                raise RuntimeError('MZ snapshot requires a fully closed workspace')
+            self.mz_sync.commit(lease, paths['upper'])
         existing = self.run(['getent', 'passwd', username], check=False)
         if existing.returncode == 0 and existing.stdout.strip():
             self.run(['userdel', username])
