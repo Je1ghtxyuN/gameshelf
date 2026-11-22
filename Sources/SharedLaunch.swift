@@ -95,17 +95,41 @@ extension App {
        }else if lease.renpyLaunch != nil{throw LibraryError("运行模块校验缺少账号存档映射。")
        }
        let mount:MountedLibraryShare
+       let folder: URL
        if let mountedShare {
         guard lease.share == nil, lease.workspaceReceipt != nil, let location = lease.mountedWorkspace,
               location.share == mountedShare, location.relative == lease.leaseID,
               AccountLibraryNASSource.validRootID(location.relative) else {
          throw LibraryError("服务器返回的账号工作区地址无效。")
         }
-        guard let root = try NetworkLibraryMount.existingShareRoot(named:mountedShare) else {
-         throw LibraryError("请先在 Finder 连接账号工作区共享「"+mountedShare+"」。")
+        let target = self.root.appendingPathComponent("SystemWorkspaceMounts/"+ref.storageKey)
+        let receipts = self.root.appendingPathComponent("SystemWorkspaceReceipts")
+        let receipt = receipts.appendingPathComponent(ref.storageKey+".json")
+        try FileManager.default.createDirectory(at:receipts,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        if let stale = try NetworkLibraryMount.recoverReceipt(at:receipt,target:target,identityKey:ref.storageKey) {
+         try NetworkLibraryMount.unmount(stale)
+         _ = try NetworkLibraryMount.recoverReceipt(at:receipt,target:target,identityKey:ref.storageKey)
         }
-        let folder = try DirectNASRoot.confinedURL(root:root, relative:location.relative, type:.typeDirectory)
-        mount = MountedLibraryShare(url:folder, owned:false)
+        try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        let background: MountedLibraryShare?
+        do {
+         guard let host = URLComponents(string:connection.address)?.host else {
+          throw NetworkLibraryMount.Failure.invalidShare
+         }
+         background = try NetworkLibraryMount.mountSystemWorkspace(host:host,name:mountedShare,at:target)
+        } catch NetworkLibraryMount.Failure.mountFailed(_) {
+         background = nil
+        }
+        if let background {
+         mounted = background
+         try NetworkLibraryMount.persistReceipt(mounted:background,identityKey:ref.storageKey,to:receipt)
+         mount = background
+        } else if let existing = try NetworkLibraryMount.existingShareRoot(named:mountedShare) {
+         mount = MountedLibraryShare(url:existing, owned:false)
+        } else {
+         throw LibraryError("无法复用系统的 NAS 登录。请先在 Finder 连接 NAS，或手动连接账号共享「"+mountedShare+"」。")
+        }
+        folder = try DirectNASRoot.confinedURL(root:mount.url, relative:location.relative, type:.typeDirectory)
        } else {
         guard let share = lease.share, lease.mountedWorkspace == nil else { throw LibraryError("服务器返回了不支持的工作区地址。") }
         let target=self.root.appendingPathComponent("NetworkMounts/"+ref.storageKey)
@@ -122,14 +146,15 @@ extension App {
         mount=try NetworkLibraryMount.mount(share:share,at:target);mounted=mount
         try NetworkLibraryMount.persistReceipt(mounted:mount,identityKey:ref.storageKey,to:receipt)
         guard mount.url.standardizedFileURL==URL(fileURLWithPath:game.folder).standardizedFileURL else{throw LibraryError("共享游戏挂载位置发生变化，未使用其他目录。")}
+        folder = mount.url
        }
-       try lease.verifyWorkspace(at:mount.url)
-       if let proof=lease.renpyLaunch{try proof.verify(view:mount.url)}
+       try lease.verifyWorkspace(at:folder)
+       if let proof=lease.renpyLaunch{try proof.verify(view:folder)}
        var rebound = game
-       rebound.folder = mount.url.path
+       rebound.folder = folder.path
        let launchGame = rebound
        _ = try SharedProfile.networkProfile(game:launchGame)
-       if let namespace=lease.saveNamespace{_ = try RenpyAccountAdapter.locations(view:mount.url,relativePath:namespace.relativePath)}
+       if let namespace=lease.saveNamespace{_ = try RenpyAccountAdapter.locations(view:folder,relativePath:namespace.relativePath)}
        try FileManager.default.createDirectory(at:self.runtimeDataRoot(for:game),withIntermediateDirectories:true)
        self.preparationReady {
         guard !self.quitting else{self.discardShared(lease:lease,mount:mount,api:client,token:token);return}

@@ -22,7 +22,7 @@ private final class MountFixture {
  var status: Int32 = 0, unmountStatus: Int32 = 0
  var after: NetworkLibraryMount.MountIdentity?
  var capturedURL: URL?
- var capturedUser = "", capturedPassword = ""
+ var capturedUser: String?, capturedPassword: String?
  var openOptions: [String: Any] = [:], mountOptions: [String: Any] = [:]
  init() {
   after = identity()
@@ -58,9 +58,32 @@ private func verifyExistingShareSelection() throws {
   mounts:[matching,fixture.identity(source:"//member@another.example/account-workspace",target:"/Volumes/Other")]) }
 }
 
+
+private func verifySystemWorkspaceMount() throws {
+ let fixture = MountFixture()
+ let existingNAS = fixture.identity(source:"//private-user@gateway.example/nas")
+ let unrelated = fixture.identity(source:"//another-user@other.example/nas")
+ let mounted = try NetworkLibraryMount.mountSystemWorkspace(host:"gateway.example", name:"gs_123-abc",
+  at:fixture.target,mounts:[existingNAS,unrelated],operations:fixture.operations)
+ try check(mounted.owned, "Only an observed background mount can be owned")
+ try check(fixture.capturedUser == "private-user" && fixture.capturedPassword == nil,
+           "Reuse the system SMB identity without supplying a password")
+ try check(fixture.openOptions[kNetFSForceNewSessionKey] as? Bool != true,
+           "Background mounting must allow reuse of the SMB session")
+ let flags = (fixture.mountOptions[kNetFSMountFlagsKey] as? NSNumber)?.uint32Value ?? 0
+ try check(flags & UInt32(MNT_DONTBROWSE) != 0, "Background workspace must be hidden")
+ try NetworkLibraryMount.unmount(mounted,operations:fixture.operations)
+ try check(fixture.unmountCalls == 1, "Release the owned connection")
+ let wrong = MountFixture()
+ wrong.after = wrong.identity(source:"//private-user@other.example/gs_123-abc")
+ try rejects { _ = try NetworkLibraryMount.mountSystemWorkspace(host:"gateway.example",name:"gs_123-abc",
+  at:wrong.target,mounts:[existingNAS],operations:wrong.operations) }
+}
+
 @main struct NetworkLibraryMountTests {
  static func main() throws {
   try verifyExistingShareSelection()
+  try verifySystemWorkspaceMount()
   try alreadyDetached()
   if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--recover-receipt" {
    let f = MountFixture(); f.state = .mounted(f.identity())

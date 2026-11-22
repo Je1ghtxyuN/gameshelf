@@ -85,13 +85,13 @@ enum NetworkLibraryMount {
   let fsid0: Int32
   let fsid1: Int32
 
-  fileprivate func matches(_ share: SharedSMBShare, at target: URL) -> Bool {
+  fileprivate func matches(_ share: SharedSMBShare, at target: URL, username: String?) -> Bool {
    guard self.target == target.path, fileSystem == "smbfs", source.hasPrefix("//"),
          let endpoint = URLComponents(string: "smb:" + source),
          let host = endpoint.host, let expectedHost = try? SharedSMBShare.validatedHost(share.host),
          let actualHost = try? SharedSMBShare.validatedHost(host),
          actualHost == expectedHost, (endpoint.port ?? 445) == share.port,
-         endpoint.user == share.username, endpoint.password == nil,
+         username == nil || endpoint.user == username, endpoint.password == nil,
          endpoint.percentEncodedPath == "/" + share.name,
          endpoint.query == nil, endpoint.fragment == nil else { return false }
    return true
@@ -109,12 +109,12 @@ enum NetworkLibraryMount {
  /// Injection is limited to OS boundaries; validation and ownership decisions stay here.
  struct Operations {
   var inspect: (URL) throws -> TargetState
-  var mount: (URL, URL, String, String, [String: Any], [String: Any]) throws -> MountResult
+  var mount: (URL, URL, String?, String?, [String: Any], [String: Any]) throws -> MountResult
   var unmount: (URL, Int32) throws -> Int32
   static var live: Operations {
    .init(inspect: inspectTarget, mount: { url, target, user, password, open, options in
     var paths: Unmanaged<CFArray>?
-    let status = NetFSMountURLSync(url as CFURL, target as CFURL, user as CFString, password as CFString,
+    let status = NetFSMountURLSync(url as CFURL, target as CFURL, user.map { $0 as CFString }, password.map { $0 as CFString },
      NSMutableDictionary(dictionary: open), NSMutableDictionary(dictionary: options), &paths)
     let returned = paths?.takeRetainedValue() as? [String] ?? []
     return MountResult(status: Int32(status), paths: returned)
@@ -131,6 +131,31 @@ enum NetworkLibraryMount {
  /// Blocking API: callers must use a worker queue. Existing mounts are never adopted.
  /// The gateway must require SMB3 encryption; an smb URL alone cannot enforce that policy.
  static func mount(share: SharedSMBShare, at target: URL, operations: Operations = .live) throws -> MountedLibraryShare {
+  try mount(share:share, at:target, username:share.username, password:share.password,
+            forceNewSession:true, operations:operations)
+ }
+
+ /// Reuse macOS SMB authentication for the NAS account. This path never receives a password.
+ static func mountSystemWorkspace(host: String, name: String, at target: URL,
+                                  mounts: [MountIdentity]? = nil, operations: Operations = .live) throws -> MountedLibraryShare {
+  let expectedHost = try SharedSMBShare.validatedHost(host)
+  let users = try Set((mounts ?? mountInventory()).compactMap { mount -> String? in
+   guard mount.fileSystem == "smbfs", mount.source.hasPrefix("//"),
+         let endpoint = URLComponents(string:"smb:" + mount.source),
+         let endpointHost = endpoint.host,
+         (try? SharedSMBShare.validatedHost(endpointHost)) == expectedHost,
+         (endpoint.port ?? 445) == 445, endpoint.password == nil,
+         let user = endpoint.user, !user.isEmpty else { return nil }
+   return user
+  })
+  // With multiple identities, let the OS select from saved credentials.
+  let user = users.count == 1 ? users.first : nil
+  let share = SharedSMBShare(host:host,port:445,name:name,username:user ?? "system",password:"")
+  return try mount(share:share, at:target, username:user, password:nil, forceNewSession:false, operations:operations)
+ }
+
+ private static func mount(share: SharedSMBShare, at target: URL, username: String?, password: String?,
+                           forceNewSession: Bool, operations: Operations) throws -> MountedLibraryShare {
   let url = try share.mountURL()
   try validateTargetURL(target)
   lock.lock(); defer { lock.unlock() }
@@ -138,13 +163,13 @@ enum NetworkLibraryMount {
   guard case .directory(_, _, let owner, true) = before, owner == geteuid() else { throw Failure.unsafeTarget }
   // Refuse a directory replaced or populated during preparation.
   guard try operations.inspect(target) == before else { throw Failure.unsafeTarget }
-  let open: [String: Any] = [kNetFSForceNewSessionKey: true, kNAUIOptionKey: kNAUIOptionNoUI]
+  let open: [String: Any] = [kNetFSForceNewSessionKey: forceNewSession, kNAUIOptionKey: kNAUIOptionNoUI]
   let options: [String: Any] = [kNetFSMountAtMountDirKey: true,
    kNetFSMountFlagsKey: NSNumber(value: UInt32(MNT_DONTBROWSE | MNT_NOSUID | MNT_NODEV))]
-  let result = try operations.mount(url, target, share.username, share.password, open, options)
+  let result = try operations.mount(url, target, username, password, open, options)
   guard result.status == 0 else { throw Failure.mountFailed(result.status) }
   guard result.paths == [target.path],
-        case .mounted(let identity) = try operations.inspect(target), identity.matches(share, at: target) else {
+        case .mounted(let identity) = try operations.inspect(target), identity.matches(share, at: target, username: username) else {
    // Never unmount some other volume while trying to clean up an unverified result.
    throw Failure.unexpectedMount
   }
@@ -276,7 +301,7 @@ enum NetworkLibraryMount {
         let username = source.user else { throw Failure.invalidReceipt }
   let share = SharedSMBShare(host: host, port: source.port ?? 445,
    name: String(source.path.dropFirst()), username: username, password: "")
-  guard (try? share.mountURL()) != nil, record.mount.matches(share, at: target) else { throw Failure.invalidReceipt }
+  guard (try? share.mountURL()) != nil, record.mount.matches(share, at: target, username: username) else { throw Failure.invalidReceipt }
  }
 
  /// Open each parent relative to a pinned descriptor. A private local directory

@@ -51,7 +51,7 @@ On first launch, connect to your server and sign in, or choose **Local use** wit
 3. Use the existing cover grid, collections, favorites, search, and **⋯ → Properties** to organize and launch games. A logical game can contain several platform editions: macOS selects its native edition first; Windows selects the Windows executable.
 4. An administrator manages accounts and access in **Settings**. Members see the same shared catalog. Each account has its own playtime and supported save profiles. Default names and covers belong to published games.
 
-Connected resources stay on the server. GameShelf opens an account-private network view and holds one writer session for a logical game across devices. When system SMB is enabled, connect your account workspace in Finder or Windows File Explorer. Supported editions can share account progress across devices. Different editions may keep independent saves.
+Connected resources stay on the server. GameShelf opens an account-private network view and holds one writer session for a logical game across devices. With system SMB enabled, complete account verification once. Mac connects to the save workspace in the background using your system NAS login. On Windows, connect your account workspace in File Explorer. Supported editions can share account progress across devices. Different editions may keep independent saves.
 
 Local use keeps a separate library and the game's ordinary save locations. Connecting a server does not upload or bind existing local games or saves automatically. Owner migration preserves the source and requires exact directory/entry mapping and a committed save-migration receipt.
 

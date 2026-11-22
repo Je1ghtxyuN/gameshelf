@@ -22,6 +22,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
  private var volumeGeneration = 0
  private var validating = false
  private var smbEnrollmentInProgress = false
+ private var confirmedSMBConnection: UUID?
  private var validationID = UUID()
  private let probeQueue = DispatchQueue(label: "GameShelf.settings.volumes", qos: .utility, attributes: .concurrent)
  private let validationQueue = DispatchQueue(label: "GameShelf.settings.validation", qos: .userInitiated)
@@ -73,7 +74,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                    pendingWeb: app?.pendingWebLaunch != nil)
  }
  private var pathSignature: String {
-  [app?.root.path ?? "", app?.runtimeRoot.path ?? "", wineSource.path, app?.activeLibraryConnection?.id.uuidString ?? "local"].joined(separator: "\n")
+  let connection = app?.activeLibraryConnection
+  let enrollmentAvailable = app?.accountLibrary?.document?.smbEnrollmentAvailable == true
+  return [app?.root.path ?? "", app?.runtimeRoot.path ?? "", wineSource.path,
+          connection?.id.uuidString ?? "local", enrollmentAvailable ? "smb" : "",
+          connection.map(smbReady(for:)) == true ? "ready" : ""].joined(separator: "\n")
  }
  private var wineSource: URL {
   let configured=URL(fileURLWithPath: UserDefaults.standard.string(forKey: "WineSource") ?? Wrapper.defaultSource.path)
@@ -270,7 +275,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
    accountCard(app)
   case 1:
    librarySourcesCard(app)
-   accountCard(app)
    let checkbox = SettingsActionButton("导入时自动联网匹配封面") {}
    checkbox.setButtonType(.switch)
    checkbox.state = UserDefaults.standard.object(forKey: "AutoOnlineCover") as? Bool == false ? .off : .on
@@ -312,18 +316,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
    card("账号",views:[actions([button("连接服务器…"){[weak app] in app?.requestAccountSwitch()}])])
    return
   }
-  var controls:[NSView]=[
-   button("账号设置"){[weak app] in app?.showSharedAccount(connectionID:connection.id)},
-   button("切换账号"){[weak app] in app?.requestAccountSwitch()},
-   button("退出登录"){[weak app] in app?.requestAccountSwitch()}
+  var views: [NSView] = [
+   label(connection.username,size:16,weight:.medium),
+   label(connection.isAdministrator ? "管理员":"普通账号",secondary:true)
   ]
-  if app.accountLibrary?.document?.smbEnrollmentAvailable == true {
-   controls.insert(button("NAS 存档接入…"){[weak self] in self?.enrollSMB(connection)},at:1)
-  }
+  var controls: [NSView] = [button("账号设置"){[weak app] in app?.showSharedAccount(connectionID:connection.id)}]
   if connection.isAdministrator {
-   controls.insert(button("账号管理"){[weak self] in self?.openAdministration(connection)},at:1)
+   controls.append(button("账号管理"){[weak self] in self?.openAdministration(connection)})
   }
-  card("账号",views:[label(connection.username,size:16,weight:.medium),label(connection.isAdministrator ? "管理员":"普通账号",secondary:true),actions(controls)])
+  if smbReady(for:connection) {
+   views.append(label("NAS 存档已接入，启动游戏时自动连接。",secondary:true))
+  } else if app.accountLibrary?.document?.smbEnrollmentAvailable == true {
+   controls.append(button("NAS 存档接入…"){[weak self] in self?.enrollSMB(connection)})
+  }
+  controls.append(button("退出登录"){[weak app] in app?.requestAccountSwitch()})
+  views.append(actions(controls))
+  card("账号",views:views)
+ }
+
+ private func smbReady(for connection: SharedConnection) -> Bool {
+  confirmedSMBConnection == connection.id || app?.accountLibrary?.document?.mountedWorkspaceShare != nil
  }
  private func enrollSMB(_ connection: SharedConnection) {
   guard !smbEnrollmentInProgress, let app, let window,
@@ -363,9 +375,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     let ready: SMBEnrollmentStatus = status.state == "ready" ? status :
      try await api.value(path+"/workspace", method:"POST", token:token, body:[:])
     guard app.activeLibraryConnection?.id == connection.id else { return }
-    guard ready.state == "ready", let share = ready.share else { throw LibraryError("NAS 存档工作区未就绪。") }
+    guard ready.state == "ready", ready.share?.isEmpty == false else { throw LibraryError("NAS 存档工作区未就绪。") }
+    self.confirmedSMBConnection = connection.id
     app.refreshAccountLibrary()
-    self.report("请在 Finder 中连接 NAS 的「"+share+"」共享。")
+    self.refreshActivity()
    } catch {
     guard app.activeLibraryConnection?.id == connection.id else { return }
     self.report(error.localizedDescription)
@@ -412,7 +425,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
      guard let self,!self.closed,self.rootsRequest==ticket,self.app?.activeLibraryConnection?.id==connection.id,let roots else{return}
      switch result {
      case .success(let value):
-      if let localRoots, let account = self.app?.accountLibrary, account.document?.directNas == true,
+      if let localRoots, self.app?.directNASPreviewEnabled == true,
+         let account = self.app?.accountLibrary, account.document?.directNas == true,
          let profile = account.profileRoot, !value.roots.isEmpty {
        roots.isHidden = true
        for source in value.roots {
